@@ -73,6 +73,13 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private lateinit var glView: GvrView
+    private var gvrSurface: android.view.SurfaceView? = null
+
+    /** Web mode needs GVR's surface above the window so the WebView is never
+     *  seen directly; the other modes need the window's close button visible. */
+    private fun applyGvrZOrder(onTop: Boolean) {
+        runCatching { gvrSurface?.setZOrderOnTop(onTop) }
+    }
     private lateinit var renderer: VrRenderer
     private lateinit var txtStatus: TextView
     private var player: ExoPlayer? = null
@@ -407,9 +414,13 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         renderer.projection = runCatching { Projection.valueOf(intent.getStringExtra(EXTRA_PROJ) ?: settings.projection.name) }.getOrDefault(settings.projection)
         renderer.stereo = runCatching { Stereo.valueOf(intent.getStringExtra(EXTRA_STEREO) ?: settings.stereo.name) }.getOrDefault(settings.stereo)
         syncGvr() // projection decides the neck model; IPD/lens too
-        // GVR's SurfaceView above the window content: the WebView can sit in
-        // the window (composited, capturable) without ever being seen.
-        findGvrSurface(glView)?.setZOrderOnTop(true)
+        // GVR's SurfaceView above the window content, but ONLY in web mode:
+        // that is what lets the WebView sit in the window (composited, and
+        // capturable by PixelCopy) without ever being seen. Set for every
+        // mode it also buried the window's own red X close button, which is
+        // drawn as ordinary window content and is wanted on the video screen.
+        gvrSurface = findGvrSurface(glView)
+        applyGvrZOrder(false)
         glView.setRenderer(renderer)
         // StereoRenderer drives both eyes; the SDK handles lens warp.
         glView.setStereoModeEnabled(true)
@@ -1555,6 +1566,13 @@ try {
     /** Into web mode. The video keeps its position (paused) so the web panel
      *  can hand it back. */
     private fun enterWeb(url: String? = null) {
+        // GVR surface ON TOP: this is what keeps the WebView from compositing
+        // over the headset view. It must keep drawing for PixelCopy to copy
+        // it, so it cannot be hidden by visibility - and being on top also
+        // buries the activity-window close button, which is why the button
+        // lives in its own Dialog window (see showFloatingClose).
+        applyGvrZOrder(true)
+        showFloatingClose()
         val wv = webView
         if (wv == null) { toast("Web view unavailable"); return }
         player?.pause()
@@ -1574,7 +1592,56 @@ try {
 
     /** Back to video, resuming whatever was playing. With no video there is
      *  nothing to go back to, so the file browser takes over. */
+    /** The close button as a SEPARATE window.
+     *
+     *  In the activity window it is an ordinary view, so it sits UNDER a
+     *  z-order-on-top SurfaceView (the GVR view). Putting the GVR surface on
+     *  top is what lets it hide the WebView - and the WebView has to keep
+     *  drawing, or PixelCopy captures nothing and the headset goes black.
+     *  Making the view INVISIBLE does not help either: it leaves the display
+     *  list, so there is nothing to copy. A Dialog is its own window, ranked
+     *  above the activity window and so above the SurfaceView too, which
+     *  leaves both the page capture and a reachable button. */
+    private var closeDialog: android.app.Dialog? = null
+
+    private fun showFloatingClose() {
+        if (closeDialog != null) return
+        val d = android.app.Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar)
+        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        val tv = android.widget.TextView(this).apply {
+            text = "\u2715"
+            textSize = 16f
+            setTextColor(android.graphics.Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+            setBackgroundResource(R.drawable.close_button_bg)
+        }
+        d.setContentView(tv)
+        d.window?.apply {
+            setBackgroundDrawable(null)
+            setLayout(dp(46), dp(46))
+            setGravity(android.view.Gravity.TOP or android.view.Gravity.START)
+            setFlags(
+                android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            )
+        }
+        tv.setOnClickListener { finish() }
+        d.show()
+        closeDialog = d
+    }
+
+    private fun hideFloatingClose() {
+        closeDialog?.dismiss()
+        closeDialog = null
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
     private fun exitWeb() {
+        applyGvrZOrder(false)
+        hideFloatingClose()
         renderer.webPanelOpen = false
         settingsFromVideo = false
         if (player != null) {

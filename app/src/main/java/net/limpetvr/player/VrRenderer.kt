@@ -1484,30 +1484,10 @@ void main(){
                 hitX = hx; hitY = hy; hitZ = hz; hitValid = true
                 val u = (alongRight + hw) / (2 * hw)
                 val v = (hh - alongUp) / (2 * hh)
-                // X close button: top-right title bar.
-                if (u > 0.90f && v * TEX < TITLE_Y1) {
-                    inXZone = true
-                    sliderHoverU = -1f
-                    lastFiredU = Float.NaN
-                    fireBlockedLogged = false
-                    highlight = -1; dwellFiredFor = -2
-                    browProgF = maxOf(0f, browProgF - dtMs / 600f)
-                    if (!xDwellFired) {
-                        if (still) xProgF += dtMs / dwellMs.toFloat()
-                        else xProgF = maxOf(0f, xProgF - dtMs / 600f)
-                    }
-                    if (still && !xDwellFired && xProgF >= 1f) {
-                        xDwellFired = true
-                        xProgF = 1f
-                        FileLog.i("LimpetVR-browser", "FIRE X close")
-                        onBrowserActivate(-10, null)
-                        return
-                    }
-                    return
-                }
-                inXZone = false
-                xDwellFired = false
-                xProgF = maxOf(0f, xProgF - dtMs / 600f)
+                // No close button on the panel: the gaze is still inside the
+                // panel's visibility range, so closing it just made it
+                // spring open again. It closes on its own when the gaze
+                // returns to the page.
                 val pin = pinTopRows.coerceIn(0, 2)
                 var idx = -1
                 // Strips mode on file pages always, and on settings pages
@@ -3076,14 +3056,6 @@ void main(){
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
         p.color = Color.WHITE; p.textSize = 44f
         c.drawText(browserTitle.take(30), 40f, 72f, p)
-        // X close button, top right of the title bar (hit zone u>0.90, y<TITLE_Y1).
-        if (inXZone) {
-            p.color = Color.rgb(30, 58, 95)
-            c.drawRect(920f, 16f, 1004f, 96f, p)
-        }
-        p.color = Color.WHITE; p.textSize = 44f; p.textAlign = Paint.Align.CENTER
-        c.drawText("✕", 962f, 72f, p)
-        p.textAlign = Paint.Align.LEFT
         if (stm) {
             // File pages: pinned nav rows, scroll strips, fractional window.
             val upY0 = upStripY0(pin); val rY0 = rowsY0(pin); val dnY0 = downStripY0(pin)
