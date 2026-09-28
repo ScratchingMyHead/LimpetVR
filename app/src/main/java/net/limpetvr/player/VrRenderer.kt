@@ -1032,11 +1032,21 @@ void main(){
             when (cur) {
                 Mode.BROWSER -> updateGaze()
                 Mode.WEB -> {
+                    // Every frame, panel open or not: the reticle falls back
+                    // to this point when the gaze leaves the panel, and it
+                    // was frozen while the panel was open because only the
+                    // debug-gated path updated it.
+                    updateWebPagePoint()
                     updateWebDebugPoint() // TEMP DEBUG: crosshair keeps tracking
-                    if (webPanelOpen) updateGaze() else {
-                        updateWebPanelTilt()
-                        updateWebGaze()
-                    }
+                    // The tilt/hold update must run even while the panel is
+                    // OPEN: it owns the open AND close transitions. Calling
+                    // only updateGaze() when the panel was up meant the hold
+                    // timer never decayed, so the close branch was
+                    // unreachable - the panel stayed up until the X row was
+                    // used, the dwell was never re-armed for the page, and
+                    // the reticle had no live page point to fall back on.
+                    updateWebPanelTilt()
+                    if (webPanelOpen) updateGaze() else updateWebGaze()
                 }
                 Mode.VIDEO -> updateMenu()
             }
@@ -2602,16 +2612,25 @@ void main(){
         webPagePointOk = true
     }
 
+    /** Track where the gaze lands on the page plane. Runs whether or not the
+     *  panel is open, and whether or not the debug crosshair is on, because
+     *  the reticle depends on it. */
+    fun updateWebPagePoint() {
+        if (mode != Mode.WEB) return
+        val uv = synchronized(headViewM) { webGazeUv(lastEffFwd) } ?: run {
+            webPagePointOk = false
+            return
+        }
+        noteWebPagePoint(uv[0], uv[1])
+    }
+
     fun updateWebDebugPoint() {
         if (!webDbgOn || mode != Mode.WEB) return
         val uv = synchronized(headViewM) { webGazeUv(lastEffFwd) } ?: return
         val z = flatZoomF()
         val tu = 0.5f + (uv[0] - 0.5f) / z
         val tv = 0.5f + (uv[1] - 0.5f) / z
-        val px = tu * webPageW
-        val py = (1f - tv) * webPageH
-        webDebugPoint = floatArrayOf(px, py)
-        noteWebPagePoint(uv[0], uv[1])
+        webDebugPoint = floatArrayOf(tu * webPageW, (1f - tv) * webPageH)
     }
 
     /** Keep the web panel shut for a moment. The gaze is often still over it
@@ -2654,6 +2673,12 @@ void main(){
             webPanelHold = maxOf(0f, webPanelHold - dt / PANEL_TOGGLE_MS)
             if (webPanelHold <= 0f && webPanelOpen) {
                 webPanelOpen = false
+                // Re-arm the dwell for the page. While the panel was open
+                // the page gaze did not run, so the fired latch kept the
+                // target it had when you looked up; coming back down onto
+                // the same link then read as already-fired and would not
+                // activate until a recenter cleared it.
+                webResetDwell()
                 FileLog.i("LimpetVR-web", "web panel close (gaze back on page)")
                 onWebEvent(WebEvent.Panel(false))
             }
