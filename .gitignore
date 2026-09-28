@@ -1,0 +1,20 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+*/build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+# Signing keystores never belong in git
+*.jks
+*.keystore
+# Captured logs / traces
+*.log
+*.hprof
+# Generated at build time by copyShapingAssets (authored copy lives in misc/)
+app/src/main/assets/shaping/
+# Python bytecode from misc/shapemesh.py runs
+__pycache__/
+*.pyc

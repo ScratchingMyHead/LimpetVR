@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:layout_margin="4dp">
+    <LinearLayout android:orientation="horizontal"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:gravity="center_vertical" android:padding="12dp">
+        <TextView android:id="@+id/txtIcon" android:text="🎬"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:textSize="22sp" />
+        <LinearLayout android:orientation="vertical"
+            android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:paddingStart="8dp">
+            <TextView android:id="@+id/txtName"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:maxLines="2" android:ellipsize="end"
+                android:textAppearance="?attr/textAppearanceBodyLarge" />
+            <TextView android:id="@+id/txtMeta"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:gravity="end"
+                android:textAppearance="?attr/textAppearanceBodySmall" />
+        </LinearLayout>
+        <com.google.android.material.button.MaterialButton android:id="@+id/btnScan"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="ⓘ" style="@style/Widget.Material3.Button.TextButton" />
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

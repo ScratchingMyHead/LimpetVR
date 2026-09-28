@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+<LinearLayout
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="16dp">
+
+    <TextView android:text="Projection" android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    <RadioGroup android:id="@+id/groupProjection"
+        android:layout_width="match_parent" android:layout_height="wrap_content">
+        <RadioButton android:id="@+id/modeFlat" android:text="Flat 2D (theater screen)" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <RadioButton android:id="@+id/mode180" android:text="180° dome" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <RadioButton android:id="@+id/mode220" android:text="220°" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <RadioButton android:id="@+id/mode270" android:text="270°" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <RadioButton android:id="@+id/mode360" android:text="360° sphere" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <RadioButton android:id="@+id/modeFisheye" android:text="Fisheye" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    </RadioGroup>
+
+    <TextView android:text="Stereo layout" android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:paddingTop="12dp" />
+    <RadioGroup android:id="@+id/groupStereo"
+        android:layout_width="match_parent" android:layout_height="wrap_content">
+        <RadioButton android:id="@+id/stereoMono" android:text="Mono / 2D" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <RadioButton android:id="@+id/stereoSbs" android:text="Side-by-side (SBS)" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        <RadioButton android:id="@+id/stereoTb" android:text="Top-bottom (TB)" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    </RadioGroup>
+
+    <TextView android:id="@+id/lblFov" android:text="FOV scale"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:paddingTop="12dp" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderFov"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="0.5" android:valueTo="1.5" android:stepSize="0.05"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblScreenSize" android:text="Screen size (Flat only)"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:paddingTop="12dp" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderScreenSize"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="0.5" android:valueTo="10" android:stepSize="0.25"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblScreenCurve" android:text="Screen curve (Flat only)"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:paddingTop="12dp" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderCurve"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="0" android:valueTo="100" android:stepSize="5"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblIpd" android:text="Eye separation (IPD)"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderIpd"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="40" android:valueTo="80" android:stepSize="1"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblLensK1" android:text="Lens distortion k1"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:paddingTop="12dp" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderLensK1"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="0" android:valueTo="1" android:stepSize="0.01"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblLensK2" android:text="Lens distortion k2"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderLensK2"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="0" android:valueTo="1" android:stepSize="0.01"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblLensStrength" android:text="Lens strength"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:paddingTop="12dp" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderLensStrength"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="0" android:valueTo="3" android:stepSize="0.05"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblMenuAngleUp" android:text="Play-menu look-up angle"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:paddingTop="12dp" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderMenuAngleUp"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="10" android:valueTo="60" android:stepSize="1"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblMenuAngleDown" android:text="Play-menu look-down angle"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:paddingTop="12dp" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderMenuAngleDown"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="10" android:valueTo="60" android:stepSize="1"
+        app:labelBehavior="floating" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchSwapEyes"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Swap left/right eyes" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchPin"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Pin video in front (no look-around)" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchSweep"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Sensor test sweep (diagnostics)" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchSwDecode"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Software video decoding (compat, slower)" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchCircleRecenter"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Head-circle gesture arms recenter" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchTooltip"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Show gaze tooltip" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchDistortion"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Lens distortion correction (Cardboard)" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchPanoHq"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="High-density panorama mesh" />
+
+    <TextView android:id="@+id/lblZoom" android:text="Video size (zoom)"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderZoom"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="0.1" android:valueTo="20" android:stepSize="0.05"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblSkip" android:text="Skip forward/back (seconds)"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderSkip"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="2" android:valueTo="60" android:stepSize="1"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblPanel" android:text="Browser panel distance"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderPanel"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="1.2" android:valueTo="5" android:stepSize="0.1"
+        app:labelBehavior="floating" />
+
+    <TextView android:id="@+id/lblDwell" android:text="Gaze select delay"
+        android:textAppearance="?attr/textAppearanceTitleSmall"
+        android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    <com.google.android.material.slider.Slider android:id="@+id/sliderDwell"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:valueFrom="400" android:valueTo="4000" android:stepSize="100"
+        app:labelBehavior="floating" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/switchStartInVrBrowser"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Start VR in file browser (recommended)"
+        android:paddingTop="12dp" />
+
+    <com.google.android.material.textfield.TextInputLayout
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:hint="Proxy buffer KB (per read)"
+        android:paddingTop="8dp">
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/editBufferKb"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:inputType="number" android:text="256" />
+    </com.google.android.material.textfield.TextInputLayout>
+</LinearLayout>
+</ScrollView>

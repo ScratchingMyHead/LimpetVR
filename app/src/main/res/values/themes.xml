@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.LimpetVR" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/limpet_accent</item>
+    </style>
+</resources>
