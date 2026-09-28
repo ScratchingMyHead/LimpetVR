@@ -178,13 +178,18 @@ class MainActivity : AppCompatActivity() {
         toolbar.subtitle = "v${BuildConfig.VERSION_NAME}"
         toolbar.inflateMenu(R.menu.main_toolbar)
         toolbar.setOnMenuItemClickListener {
-            if (it.itemId == R.id.action_vr) { enterVrBrowser(); true } else false
+            when (it.itemId) {
+                R.id.action_vr -> { enterVrBrowser(); true }
+                R.id.action_web -> { enterVrWeb(); true }
+                else -> false
+            }
         }
         val nav = findViewById<BottomNavigationView>(R.id.bottomNav)
         nav.setOnItemSelectedListener {
             when (it.itemId) {
                 R.id.tab_connections -> showConnections()
                 R.id.tab_display -> showDisplay()
+                R.id.tab_urls -> showUrls()
                 else -> showWatch()
             }
             true
@@ -592,6 +597,107 @@ class MainActivity : AppCompatActivity() {
             putExtra(VrPlayerActivity.EXTRA_PATH, path)
         }
         startActivity(i)
+    }
+
+    /** "Enter Web": the cardboard display straight into the browser, with
+     *  the same optics the 2D screen is set to. */
+    private fun enterVrWeb() {
+        startActivity(Intent(this, VrPlayerActivity::class.java).apply {
+            putExtra(VrPlayerActivity.EXTRA_WEB, true)
+            putExtra(VrPlayerActivity.EXTRA_PROJ, settings.projection.name)
+            putExtra(VrPlayerActivity.EXTRA_STEREO, settings.stereo.name)
+        })
+    }
+
+    // ---------- URLs (bookmarks for the VR web view) ----------
+    private var urlsView: View? = null
+    private var bookmarks: MutableList<WebBookmark> = mutableListOf()
+    private val bookmarkStore by lazy { BookmarkStore(this) }
+
+    private fun showUrls() {
+        val v = urlsView ?: LayoutInflater.from(this).inflate(R.layout.page_urls, container, false)
+            .also { urlsView = it }
+        swapTo(v)
+        v.findViewById<View>(R.id.btnAddUrl).setOnClickListener { editBookmark(null) }
+        renderUrls(v)
+    }
+
+    private fun renderUrls(root: View) {
+        bookmarks = bookmarkStore.load()
+        val list = root.findViewById<android.widget.LinearLayout>(R.id.listUrls)
+        list.removeAllViews()
+        if (bookmarks.isEmpty()) {
+            list.addView(android.widget.TextView(this).apply {
+                text = "No bookmarks yet. Add one below — it will show up in the VR web panel."
+                textSize = 14f; alpha = 0.7f; setPadding(4, 12, 4, 12)
+            })
+            return
+        }
+        val pad = (10 * resources.displayMetrics.density).toInt()
+        for (b in bookmarks) {
+            val row = android.widget.LinearLayout(this).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(4, pad, 4, pad)
+                setBackgroundResource(android.R.drawable.list_selector_background)
+                isClickable = true
+                setOnClickListener { editBookmark(b) }
+            }
+            row.addView(android.widget.TextView(this).apply {
+                text = b.title.ifBlank { b.url }
+                textSize = 16f
+                maxLines = 1
+                layoutParams = android.widget.LinearLayout.LayoutParams(0,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            row.addView(android.widget.TextView(this).apply {
+                text = "✕"
+                textSize = 18f
+                setPadding(pad * 2, 0, pad, 0)
+                setOnClickListener {
+                    bookmarks = bookmarks.filterNot { it.id == b.id }.toMutableList()
+                    bookmarkStore.save(bookmarks)
+                    renderUrls(root)
+                }
+            })
+            list.addView(row)
+            list.addView(android.widget.TextView(this).apply {
+                text = b.url
+                textSize = 12f; alpha = 0.6f; setPadding(6, 0, 6, 0)
+            })
+        }
+    }
+
+    private fun editBookmark(existing: WebBookmark?) {
+        val dlg = LayoutInflater.from(this).inflate(R.layout.dialog_url, null)
+        val name = dlg.findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editUrlName)
+        val addr = dlg.findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.editUrlAddr)
+        if (existing != null) { name.setText(existing.title); addr.setText(existing.url) }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(if (existing == null) "Add bookmark" else "Edit bookmark")
+            .setView(dlg)
+            .setPositiveButton("Save") { _, _ ->
+                val url = normalizeUrl(addr.text.toString())
+                if (url.isBlank()) {
+                    Toast.makeText(this, "Enter a URL", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val list = bookmarkStore.load()
+                val id = existing?.id ?: java.util.UUID.randomUUID().toString()
+                list.removeAll { it.id == id }
+                list.add(WebBookmark(id, name.text.toString().trim(), url))
+                bookmarkStore.save(list)
+                renderUrls(urlsView ?: return@setPositiveButton)
+            }
+            .setNeutralButton(if (existing != null) "Delete" else null) { _, _ ->
+                if (existing != null) {
+                    bookmarkStore.save(bookmarkStore.load().filterNot { it.id == existing.id })
+                    renderUrls(urlsView ?: return@setNeutralButton)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+            .also { it.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE) }
     }
 
     // ---------- Connections ----------

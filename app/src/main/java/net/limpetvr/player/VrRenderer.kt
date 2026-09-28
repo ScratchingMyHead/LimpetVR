@@ -41,10 +41,25 @@ import javax.microedition.khronos.egl.EGLConfig
  */
 class VrRenderer(
     private val onBrowserActivate: (Int, Float?) -> Unit,
-    private val onMenuEvent: (MenuEvent) -> Unit = {}
+    private val onMenuEvent: (MenuEvent) -> Unit = {},
+    private val onWebEvent: (WebEvent) -> Unit = {}
 ) : GvrView.StereoRenderer, SurfaceTexture.OnFrameAvailableListener {
 
-    enum class Mode { BROWSER, VIDEO }
+    enum class Mode { BROWSER, VIDEO, WEB }
+
+    /** Web-mode events out to the activity (all marshalled to the UI thread
+     *  there). HitTest is a question (answer with [onWebHit]), the rest are
+     *  commands. */
+    sealed class WebEvent {
+        /** Ask the page what lives at page pixel (px, py). */
+        data class HitTest(val token: Int, val px: Float, val py: Float) : WebEvent()
+        /** Dwell finished on a link/control: activate it. */
+        data class Click(val px: Float, val py: Float) : WebEvent()
+        /** Scrollbar arrow dwell: -1 = page up, +1 = page down. */
+        data class Scroll(val dir: Int) : WebEvent()
+        /** Dwell on inert page: open (true) or close (false) the web panel. */
+        data class Panel(val open: Boolean) : WebEvent()
+    }
 
     /** The GvrView we render into, set by the activity. Only used for
      *  recentering (GL thread reads, activity may swap it any time). */
@@ -124,6 +139,67 @@ class VrRenderer(
     // frozen video, healthy audio/position/buffers, zero errors. This exact
     // failure froze every video at varying 5-15s until found.
     @Volatile private var frameAvailable = false
+
+    // ---------------- web (WebView -> SurfaceTexture -> OES texture) ----------------
+    // The page is hosted by a WebView inside a TextureView in the activity;
+    // its SurfaceTexture becomes an external GL texture sampled by the SAME
+    // flat-screen path the video uses (same size, curve and zoom), so WEB
+    // borrows drawVideo() wholesale rather than growing a second pipeline.
+    /** Web page size in pixels (the WebView's viewport). */
+    @Volatile var webPageW: Int = 1280
+    @Volatile var webPageH: Int = 720
+    /** Page frames uploaded (GL thread). 0 = nothing has landed: the page
+     *  never rendered, or the copy failed. */
+    @Volatile var webConsumedFrames: Long = 0L
+        private set
+    /** Hand a freshly captured page bitmap to the GL thread (UI thread).
+     *  The bitmap is reused by the caller, so it is uploaded on the very
+     *  next frame — the copy must not be mutated before then. */
+    fun submitWebFrame(bmp: Bitmap) { webBmpPending = bmp }
+    /** Answer to a [WebEvent.HitTest]: is there something clickable at the
+     *  page pixel that token asked about? */
+    fun onWebHit(token: Int, interactive: Boolean) {
+        if (token == webHitToken) webHitInteractive = interactive
+    }
+    /** Page scroll state from the activity (thumb position + scrollable). */
+    @Volatile var webScrollFrac: Float = 0f
+    /** Visible fraction of the page (0..1) — sets the thumb's size. */
+    @Volatile var webViewFrac: Float = 1f
+    @Volatile var webScrollable: Boolean = false
+    /** The web control panel is open (gaze drives the panel, not the page). */
+    @Volatile var webPanelOpen: Boolean = false
+
+    @Volatile private var webBmpPending: Bitmap? = null
+    private var webTexId: Int = -1
+    private var webBarTexId: Int = -1
+    private var webBarBitmap: Bitmap? = null
+    private var webBarMesh: Mesh? = null
+    private var webBarMeshKey = ""
+    @Volatile private var webBmpConsumed = 0L
+    private var webHitToken = 0
+    @Volatile private var webHitInteractive = false
+    private var webHitAskedAt = 0L
+    private var webAskPx = -1f
+    private var webAskPy = -1f
+    /** Page pixels of head wobble still considered "the same place", so a
+     *  slightly stale hit answer is trusted rather than flickering. */
+    private val WEB_HIT_SLOP = 70f
+    private var webLastClickAt = 0L
+    // dwell state for the page itself
+    private var webProgF = 0f
+    private var webProgT = 0L
+    private var webTarget = ""      // "" = inert page, else "px,py"
+    private var webFiredFor = "\u0000none"
+    private var webPanelHold = 0f
+    private var webPanelT0 = 0L
+    private var webPanelLockUntil = 0L
+    /** TEMP DEBUG: where the gaze samples, for the on-page crosshair. */
+    @Volatile var webDebugPoint: FloatArray? = null
+    private var webDbgT0 = 0L
+    @Volatile var webDbgOn: Boolean = false // TEMP DEBUG
+    private var webScrollDir = 0
+    private var webScrollFiredFor = 0
+    private val webStill = MotionStillness(400L, 5f)
 
     @Volatile var browserTitle: String = "/"
     @Volatile var browserRows: List<BrowserRow> = emptyList()
@@ -241,6 +317,7 @@ class VrRenderer(
     /** Snap the world to the current head pose — full 3DOF (yaw, pitch and
      *  roll), consumed on the GL thread in frameTick. */
     fun recenter(why: String = "auto"): Boolean {
+        if (mode == Mode.WEB) webPanelLockUntil = now() + (PANEL_TOGGLE_MS * 4).toLong()
         android.util.Log.d("LimpetVR-basis", "recenter ($why)")
         try { FileLog.d("LimpetVR-basis", "recenter ($why)") } catch (_: Throwable) {}
         snapTag = "auto"
@@ -258,7 +335,7 @@ class VrRenderer(
 
     @Volatile private var inputGraceUntil = 0L
 
-    private var progOes = 0; private var prog2d = 0
+    private var progOes = 0; private var prog2d = 0; private var progWeb = 0
     private var aPosOes = 0; private var aTexOes = 0; private var uMvpOes = 0
     private var uTexOes = 0; private var uStereoOes = 0; private var uEyeOes = 0
     private var uTexMatOes = 0; private var uZoomOutOes = 0
@@ -271,6 +348,8 @@ class VrRenderer(
     private var uWarpOnOes = 0; private var uWarpCxOes = 0; private var uWarpK1Oes = 0; private var uWarpK2Oes = 0; private var uWarpAspectOes = 0
     private var aPos2d = 0; private var aTex2d = 0; private var uMvp2d = 0; private var uTex2d = 0
     private var uAlpha2d = 0
+    private var aPosWeb = 0; private var aTexWeb = 0
+    private var uMvpWeb = 0; private var uTexWeb = 0; private var uZoomWeb = 0
 
     private var mesh: Mesh? = null
     private var meshKey: String = ""
@@ -289,6 +368,7 @@ class VrRenderer(
     private val projM = FloatArray(16)
     private val eyeViewNM = FloatArray(16)
     private val ovM = FloatArray(16)
+    private val ptrTmp3 = FloatArray(3)
     private val projDomeM = FloatArray(16)
     private val domeOvM = FloatArray(16)
     /** Eye translation in head space (eyeView · headView⁻¹), pinVideo only. */
@@ -515,6 +595,8 @@ class VrRenderer(
         const val STRIP_ROWS_PER_SEC = 10f
         // Panel open/close fade: fast smoothstep, both directions.
         const val PANEL_FADE_MS = 180f
+    /** How long the gaze must rest on the web panel to toggle it. */
+    const val PANEL_TOGGLE_MS = 350f
 
         private const val VERT = """
 attribute vec4 aPos; attribute vec2 aTex; varying vec2 vTex; varying vec3 vDir; uniform mat4 uMvp;
@@ -659,6 +741,26 @@ precision mediump float;
 varying vec2 vTex; varying vec3 vDir; uniform sampler2D uTex; uniform float uAlpha;
 void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
 """
+        /** Web page: the panel shader plus the flat video's centre zoom, so
+         *  the browser magnifies over the same 0.1..20x range. */
+        private const val FRAG_WEB = """
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 vTex; varying vec3 vDir; uniform sampler2D uTex; uniform float uZoom;
+void main(){
+  vec2 c = vec2(0.5);
+  vec2 t = c + (vTex - c) / uZoom;
+  // The flat-screen mesh is wound for the video's external textures (v=0 is
+  // the BOTTOM row); a bitmap capture is the other way up, so flip it here
+  // rather than disturbing the shared mesh.
+  t.y = 1.0 - t.y;
+  if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) { gl_FragColor = vec4(0.0,0.0,0.0,1.0); return; }
+  gl_FragColor = texture2D(uTex, t);
+}
+"""
     }
 
     override fun onSurfaceCreated(config: EGLConfig?) {
@@ -708,6 +810,12 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
         uMvp2d = GLES20.glGetUniformLocation(prog2d, "uMvp")
         uTex2d = GLES20.glGetUniformLocation(prog2d, "uTex")
         uAlpha2d = GLES20.glGetUniformLocation(prog2d, "uAlpha")
+        progWeb = buildProgram(VERT, FRAG_WEB)
+        aPosWeb = GLES20.glGetAttribLocation(progWeb, "aPos")
+        aTexWeb = GLES20.glGetAttribLocation(progWeb, "aTex")
+        uMvpWeb = GLES20.glGetUniformLocation(progWeb, "uMvp")
+        uTexWeb = GLES20.glGetUniformLocation(progWeb, "uTex")
+        uZoomWeb = GLES20.glGetUniformLocation(progWeb, "uZoom")
 
         val tex = IntArray(1)
         GLES20.glGenTextures(1, tex, 0)
@@ -725,6 +833,22 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
         GLES20.glGenTextures(1, tex, 0)
         browserTexId = tex[0]
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, browserTexId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+
+        // Web page texture: a plain 2D texture fed by PixelCopy captures of
+        // the WebView, drawn by drawWeb() on the flat screen.
+        GLES20.glGenTextures(1, tex, 0)
+        webTexId = tex[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, webTexId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+        GLES20.glGenTextures(1, tex, 0)
+        webBarTexId = tex[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, webBarTexId)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
 
@@ -752,6 +876,8 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
         meshKey = "" // meshes survive, but rebuild against the new session
         browserGrid = null
         menuGrid = null
+        webBarMesh = null
+        webBarMeshKey = ""
         lastPanelHash = 0
         lastMenuHash = 0
         lastTipText = null
@@ -889,27 +1015,50 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
         }
 
         val cur = mode
+        // Web page: upload the latest capture (if the page changed) before
+        // anyone samples it.
+        val wb = webBmpPending
+        if (wb != null && webTexId >= 0) {
+            webBmpPending = null
+            try {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, webTexId)
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, wb, 0)
+                webConsumedFrames = ++webBmpConsumed
+            } catch (_: Throwable) {
+            }
+        }
         // Dwell is suspended for the whole calibration sweep.
         if (!screenSweep) {
-            if (cur == Mode.BROWSER) updateGaze()
-            if (cur == Mode.VIDEO) updateMenu() else { menuOpen = false; menuHitValid = false }
+            when (cur) {
+                Mode.BROWSER -> updateGaze()
+                Mode.WEB -> {
+                    updateWebDebugPoint() // TEMP DEBUG: crosshair keeps tracking
+                    if (webPanelOpen) updateGaze() else {
+                        updateWebPanelTilt()
+                        updateWebGaze()
+                    }
+                }
+                Mode.VIDEO -> updateMenu()
+            }
+            if (cur != Mode.VIDEO) { menuOpen = false; menuHitValid = false }
         }
         // Panel fade (fast smoothstep both ways): browser fades with mode,
         // menu with menuOpen. Alphas gate the draw calls so a closing panel
         // keeps rendering until fully transparent.
-        browAlpha = fadeAlpha(cur == Mode.BROWSER, true)
+        browAlpha = fadeAlpha(cur == Mode.BROWSER || (cur == Mode.WEB && webPanelOpen), true)
         menuAlpha = fadeAlpha(cur == Mode.VIDEO && menuOpen, false)
 
         // The curved cap bakes world size into the mesh, so curve/w/h join
         // the key while bent — curve 0 keeps the old unit-quad key (no churn
         // from size/aspect changes on the plain plane).
-        val wantMeshKey = projection.name + "|sh=" + shapingRevision.toString() + "|q=" + panoQuality +
-            if (projection == Projection.FLAT && screenCurve > 0f) {
+        val wantMeshKey = effProj().name + "|sh=" + shapingRevision.toString() + "|q=" + panoQuality +
+            (if (mode == Mode.WEB) "|web=" + webPageW + "x" + webPageH else "") +
+            if (effProj() == Projection.FLAT && screenCurve > 0f) {
                 val (w, h) = screenDims()
                 "|c=" + ((screenCurve * 100f) + 0.5f).toInt() +
                     "|w=" + ((w * 1000f) + 0.5f).toInt() + "|h=" + ((h * 1000f) + 0.5f).toInt()
             } else ""
-        if (meshKey != wantMeshKey) { mesh = buildMesh(projection); meshKey = wantMeshKey }
+        if (meshKey != wantMeshKey) { mesh = buildMesh(effProj()); meshKey = wantMeshKey }
     }
 
     private var browAlpha = 0f
@@ -1006,7 +1155,8 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         // Panels float over LIVE video in BROWSER mode too, so the queue
         // (and the draw) keep running there once frames have arrived.
-        if (cur == Mode.VIDEO || arrivedFrames > 0) drawVideo(uEye)
+        if (cur == Mode.WEB) { drawWeb(uEye); drawWebBar() }
+        else if (cur == Mode.VIDEO || arrivedFrames > 0) drawVideo(uEye)
         GLES20.glDisable(GLES20.GL_DEPTH_TEST)
         if (cur == Mode.VIDEO) { if (menuAlpha > 0f) drawMenuPanel(menuAlpha) }
         else if (browAlpha > 0f) drawBrowser(browAlpha)
@@ -1038,9 +1188,16 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
      *  reticle lands on the hovered hit no matter how deep it sits. */
     private fun drawHeadLocked() {
         val cur = mode
+        // With the web panel up, the gaze is on its rows, so the reticle
+        // animates with the PANEL's dwell (it was reading the page's, which
+        // is always idle then, so rows never shrank).
+        val panelGaze = cur == Mode.WEB && webPanelOpen
         val prog = if (screenSweep) screenSweepProg() else
+            if (panelGaze) browserDwellProg() else
+            if (cur == Mode.WEB) webDwellProg() else
             if (cur == Mode.BROWSER) browserDwellProg() else menuDwellProg()
-        val show = testSweep || screenSweep || cur == Mode.BROWSER ||
+        // The reticle is ALWAYS up in web mode: the page is the pointer.
+        val show = testSweep || screenSweep || cur == Mode.WEB || cur == Mode.BROWSER ||
             (cur == Mode.VIDEO && menuOpen && (menuHitValid || prog > 0f))
         if (show) drawPointer(prog, reticleTexId, 1f)
         if (cur == Mode.VIDEO && menuOpen) reticleDiag(show, prog)
@@ -1077,12 +1234,77 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
      *  ov alone would pin it to a fixed world point, which lands off-screen
      *  as soon as the head tilts to the menu. */
     private fun drawPointer(prog: Float, texId: Int, sizeMul: Float) {
+        // Over the page the reticle belongs at the page's depth, not the
+        // panel's: a near reticle over a far screen is offset per eye.
+        // Until the first page hit (or after the gaze leaves it) fall back to
+        // the screen centre's distance, so the reticle never hops between the
+        // page depth and the panel depth.
+        if (mode == Mode.WEB && !webPanelOpen && webPagePointOk) {
+            // On the page: sit exactly on the sampled surface point, so the
+            // reticle and the page converge at the same distance in each
+            // eye. Placing it "d metres along the ray" left the stereo pair
+            // slightly wider than the page it was pointing at.
+            // ON the page point where the gaze ray lands. That point is
+            // world-anchored, which is correct for a cursor on a flat
+            // screen: it moves as the head moves because the ray genuinely
+            // sweeps across the page. Deriving the position from the ray
+            // instead (head-locked at a fixed distance) put the reticle on
+            // a rigid stalk that slid the opposite way.
+            webReticleAt(webPagePoint)
+            putQuad(ptrVerts, ptrTex, -webRetS(sizeMul, prog), -webRetS(sizeMul, prog),
+                webRetS(sizeMul, prog), webRetS(sizeMul, prog))
+            Matrix.multiplyMM(mvpM, 0, ovM, 0, tmpA, 0)
+            drawQuadTex(texId, mvpM)
+            return
+        }
+        // The panel floats at browserElevDeg ABOVE eye level, so the reticle
+        // has to sit on the same point of the sphere - placing it dead ahead
+        // at eye level put it below the panel, which is where the gaze lands
+        // when you look up at the menu. (It is drawn over the panel whether or
+        // not the panel is open, so this also covers the web-panel case.)
         val d = panelDistM
-        val s = kotlin.math.sin(RETICLE_ANG) * d * sizeMul * (1f - 0.85f * prog.coerceIn(0f, 1f))
-        putQuad(ptrVerts, ptrTex, -s, -s, s, s)
-        headLockedAt(tmpA, 0f, 0f, -d)
-        Matrix.multiplyMM(mvpM, 0, ovM, 0, tmpB, 0)
+        // Off the panel: fall back to the page if the gaze is still on it,
+        // otherwise hold the last known point rather than snapping to a
+        // centre that is nowhere near what the user is looking at.
+        // Order matters. While the panel is open the gaze belongs to the
+        // panel, so the panel wins; only when the ray misses the panel does
+        // the reticle fall back to the page. Putting the panel's own hit
+        // ahead of the page point (both are panel data while it is open)
+        // meant the reticle could never leave the panel at all.
+        // In the gap (above the panel, or off its edge) the ray still has to
+        // drive the reticle. Holding the last position instead froze it at a
+        // fixed spot - the same spot every time, and whichever spot the gaze
+        // last crossed - which is what it did above the menu. Ray-following
+        // is continuous through the gap, so it slides on and off the panel.
+        val onPanel = webPanelPoint(ptrTmp3)
+        if (!onPanel && !webPagePointOk) {
+            webReticleRay(d)
+            val sr = webRetS(sizeMul, prog)
+            putQuad(ptrVerts, ptrTex, -sr, -sr, sr, sr)
+            Matrix.multiplyMM(mvpM, 0, ovM, 0, tmpA, 0)
+            drawQuadTex(texId, mvpM)
+            return
+        }
+        val tgt = when {
+            onPanel -> ptrTmp3
+            webPagePointOk -> webPagePoint
+            else -> webLastPoint
+        }
+        webReticleAt(tgt)
+        val sr = webRetS(sizeMul, prog)
+        putQuad(ptrVerts, ptrTex, -sr, -sr, sr, sr)
+        Matrix.multiplyMM(mvpM, 0, ovM, 0, tmpA, 0)
         drawQuadTex(texId, mvpM)
+    }
+
+    /** Head-to-screen-centre distance, the reticle's depth before the gaze
+     *  has landed on the page. 0 if the screen is not there. */
+    private fun webScreenCentreDist(): Float {
+        webPointAt(0.5f, 0.5f, wpTmp)
+        val dx = wpTmp[0] - invHeadWorldM[12]
+        val dy = wpTmp[1] - invHeadWorldM[13]
+        val dz = wpTmp[2] - invHeadWorldM[14]
+        return kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
     }
 
     /** tmpB = invHeadWorldM · T(x,y,z): a head-space offset in world coords,
@@ -1090,7 +1312,15 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
     private fun headLockedAt(t: FloatArray, x: Float, y: Float, z: Float) {
         Matrix.setIdentityM(t, 0)
         Matrix.translateM(t, 0, x, y, z)
-        Matrix.multiplyMM(tmpB, 0, invHeadWorldM, 0, t, 0)
+        // ovM is world->clip, so the point handed to it must be in WORLD
+        // space: headWorldM (head->world) maps the head-local offset out to
+        // the world. Composing invHeadWorldM (world->head) here applied the
+        // head pose twice, which is a no-op only while the pose is identity
+        // and a wrong depth/rotation everywhere else - so head-locked items
+        // sat at the right screen spot but the wrong distance in each eye,
+        // and recenter (which writes a real rotation into the basis) is
+        // exactly when it started to show.
+        Matrix.multiplyMM(tmpB, 0, headWorldM, 0, t, 0)
     }
 
 
@@ -1525,10 +1755,13 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
      *  strip; the pane's top edge hugs them so the top band stays tight).
      *  Title and backdrop are decorative. */
     private val menuButtons = arrayOf(
-        MenuBtn(0, -3.75f, 0f, glyph = "⚙"),   // settings, ahead of shape
-        MenuBtn(1, -3.00f, 0f, glyph = "⧗"),
-        MenuBtn(2, -2.25f, 0f, glyph = "📁"),
-        MenuBtn(3, -1.50f, 0f, glyph = "⏮"),
+    // Transport row runs one pitch further left now that web sits beside
+    // the files button (9 buttons, still clear of the zoom/fov/vol columns).
+    MenuBtn(0, -4.50f, 0f, glyph = "⚙"),   // settings, ahead of shape
+    MenuBtn(1, -3.75f, 0f, glyph = "⧗"),
+    MenuBtn(2, -3.00f, 0f, glyph = "📁"),
+    MenuBtn(18, -2.25f, 0f, glyph = "🌐"),  // web, beside files
+    MenuBtn(3, -1.50f, 0f, glyph = "⏮"),
         MenuBtn(4, -0.75f, 0f, glyph = "⏪"),
         MenuBtn(5, 0.00f, 0f),   // play / pause drawn from menuPlaying
         MenuBtn(6, 0.75f, 0f, glyph = "⏩"),
@@ -1926,9 +2159,9 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
         buildVideoModel()
         // Panoramic video rides the FOV-scaled projection; the FLAT screen
         // shares the unscaled one with every panel (§6.3).
-        val projBase = if (projection == Projection.FLAT) ovM else domeOvM
+        val projBase = if (effProj() == Projection.FLAT) ovM else domeOvM
         Matrix.multiplyMM(mvpM, 0, projBase, 0, modelM, 0)
-        if (projection == Projection.FISHEYE) {
+        if (effProj() == Projection.FISHEYE) {
             drawVideoFisheye(eye, m)
             return
         }
@@ -1941,7 +2174,7 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
         GLES20.glUniformMatrix4fv(uTexMatOes, 1, false, texMat, 0)
         // Texture zoom lives only on the finite FLAT quad (§5); domes keep
         // the full sampled range here and slide the model instead.
-        GLES20.glUniform1f(uZoomOutOes, if (projection == Projection.FLAT) flatZoomF() else 1f)
+        GLES20.glUniform1f(uZoomOutOes, if (effProj() == Projection.FLAT) flatZoomF() else 1f)
         GLES20.glUniformMatrix4fv(uMvpOes, 1, false, mvpM, 0)
         GLES20.glEnableVertexAttribArray(aPosOes)
         GLES20.glVertexAttribPointer(aPosOes, 3, GLES20.GL_FLOAT, false, 0, m.verts)
@@ -1952,18 +2185,602 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
         GLES20.glDisableVertexAttribArray(aTexOes)
     }
 
+    // ---------- web mode ----------
+    private val IDENTITY16 = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
+
+    /** The page on the flat screen: same mesh, model, curve and zoom range
+     *  as the 2D video, but a plain 2D texture (the page is a capture, not
+     *  a decoder surface), so it needs its own tiny program for the zoom. */
+    private fun drawWeb(eye: Int) {
+        val m = mesh ?: return
+        if (webTexId < 0 || webConsumedFrames == 0L) return
+        buildVideoModel()
+        Matrix.multiplyMM(mvpM, 0, ovM, 0, modelM, 0)
+        GLES20.glUseProgram(progWeb)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, webTexId)
+        GLES20.glUniform1i(uTexWeb, 0)
+        GLES20.glUniform1f(uZoomWeb, flatZoomF())
+        GLES20.glUniformMatrix4fv(uMvpWeb, 1, false, mvpM, 0)
+        GLES20.glEnableVertexAttribArray(aPosWeb)
+        GLES20.glVertexAttribPointer(aPosWeb, 3, GLES20.GL_FLOAT, false, 0, m.verts)
+        GLES20.glEnableVertexAttribArray(aTexWeb)
+        GLES20.glVertexAttribPointer(aTexWeb, 2, GLES20.GL_FLOAT, false, 0, m.tex)
+        GLES20.glDrawElements(GLES20.GL_TRIANGLES, m.indexCount, GLES20.GL_UNSIGNED_SHORT, m.indices)
+        GLES20.glDisableVertexAttribArray(aPosWeb)
+        GLES20.glDisableVertexAttribArray(aTexWeb)
+    }
+
+    /** World point of page texture coord (u,v) — the exact geometry the
+     *  flat screen mesh uses (plane at curve 0, eye-centred cap blend above
+     *  it), including buildVideoModel's +0.25 lift. v is GL texture space
+     *  (v=1 is the TOP row of the page). */
+    private fun webPointAt(u: Float, v: Float, out: FloatArray) {
+        val (w, h) = screenDims()
+        val c = screenCurve.coerceIn(0f, 1f)
+        val fx = (u - 0.5f) * w
+        val fy = (v - 0.5f) * h
+        if (c <= 0f) {
+            out[0] = fx; out[1] = fy + 0.25f; out[2] = -FLAT_DIST
+            return
+        }
+        val arcMax = Math.toRadians(SCREEN_ARC_MAX_DEG.toDouble()).toFloat()
+        val rt = maxOf(SCREEN_R_MIN, w / arcMax)
+        val ax = (u - 0.5f) * w / rt
+        val by = (v - 0.5f) * h / rt
+        val cyb = kotlin.math.cos(by); val syb = kotlin.math.sin(by)
+        val cx = rt * cyb * kotlin.math.sin(ax)
+        val ry = rt * syb
+        val cz = -rt * cyb * kotlin.math.cos(ax)
+        out[0] = fx + (cx - fx) * c
+        out[1] = fy + (ry - fy) * c + 0.25f
+        out[2] = -FLAT_DIST + (cz + FLAT_DIST) * c
+    }
+
+    /** Gaze ray -> page texture coord by solving P(u,v) parallel to the ray
+     *  with Newton iterations (the curved cap is not a plane, so a single
+     *  plane intersection would miss by most of a button at curve 1).
+     *  Null when the ray leaves the screen. */
+    @Volatile private var webGazeDist = -1f
+
+    private fun webGazeUv(fwd: FloatArray): FloatArray? {
+        val hx = invHeadWorldM[12]; val hy = invHeadWorldM[13]; val hz = invHeadWorldM[14]
+        val p = FloatArray(3); val pu = FloatArray(3); val pv = FloatArray(3)
+        var u = 0.5f; var v = 0.5f
+        val h = 0.002f
+        for (it in 0 until 5) {
+            webPointAt(u, v, p)
+            val qx = p[0] - hx; val qy = p[1] - hy; val qz = p[2] - hz
+            val fx = qy * fwd[2] - qz * fwd[1]
+            val fy = qz * fwd[0] - qx * fwd[2]
+            if (kotlin.math.abs(fx) < 2e-4f && kotlin.math.abs(fy) < 2e-4f) break
+            webPointAt(u + h, v, pu); webPointAt(u, v + h, pv)
+            val a = pu[0] - hx; val b = pu[1] - hy; val cc = pu[2] - hz
+            val d0 = pv[0] - hx; val d1 = pv[1] - hy; val d2 = pv[2] - hz
+            val jx1 = b * fwd[2] - cc * fwd[1]; val jy1 = cc * fwd[0] - a * fwd[2]
+            val jx2 = d1 * fwd[2] - d2 * fwd[1]; val jy2 = d2 * fwd[0] - d0 * fwd[2]
+            val a11 = (jx1 - fx) / h; val a12 = (jx2 - fx) / h
+            val a21 = (jy1 - fy) / h; val a22 = (jy2 - fy) / h
+            val det = a11 * a22 - a12 * a21
+            if (kotlin.math.abs(det) < 1e-9f) return null
+            u = (u + (-fx * a22 + a12 * fy) / det).coerceIn(-0.4f, 1.4f)
+            v = (v + (-a11 * fy + a21 * fx) / det).coerceIn(-0.4f, 1.4f)
+        }
+        // Off the page the solution still lies on the screen PLANE, so return
+        // it (outside 0..1) rather than null: that gives the reticle a target
+        // which keeps moving smoothly as the gaze leaves the page, instead of
+        // pinning it to the page edge where it stalled in the gap. Only a ray
+        // that stops facing the plane returns null.
+        if (u > -0.4f && u < 1.4f && v > -0.4f && v < 1.4f) {
+            webPointAt(u, v, p)
+            val dx = p[0] - hx; val dy = p[1] - hy; val dz = p[2] - hz
+            webGazeDist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+            return floatArrayOf(u, v)
+        }
+        return null
+    }
+
+    /** Scrollbar strip geometry, in screen texture space. Fixed, so the
+     *  mesh only rebuilds when the screen (curve/size) changes. The strip is
+     *  deliberately wide and the arrows tall: they are the only gaze targets
+     *  on the page, and a few pixels of head wobble used to mean "miss". */
+    private val barU0 = 0.930f
+    private val barU1 = 0.994f
+    private val barV0 = 0.010f
+    private val barV1 = 0.990f
+    private val BAR_ARROW = 0.090f
+    /** Gaze slop around a bar target, in screen units. */
+    private val BAR_SLOP_U = 0.020f
+    private val BAR_SLOP_V = 0.030f
+
+    /** -1 / 1 when the gaze is on a scrollbar arrow, else 0. The slop makes
+     *  the small targets forgiving of a pixel or two of mapping error.
+     *  v is screen texture space: v = 1 is the TOP of the screen. */
+    private fun webBarDir(u: Float, v: Float): Int {
+        if (!webScrollable) return 0
+        if (u < barU0 - BAR_SLOP_U || u > barU1 + BAR_SLOP_U) return 0
+        if (v < barV0 - BAR_SLOP_V || v > barV1 + BAR_SLOP_V) return 0
+        if (v >= barV1 - BAR_ARROW) return -1   // top arrow: page up
+        if (v <= barV0 + BAR_ARROW) return 1    // bottom arrow: page down
+        return 0
+    }
+
+    /** Dwell on the page: arrows scroll, links/controls click, inert page
+     *  opens the web panel. Same leaky dwell + stillness gate as the menu. */
+    private fun updateWebGaze() {
+        val nowMs = now()
+        val dtMs = (nowMs - webProgT).coerceIn(0L, 500L)
+        webProgT = nowMs
+        val uv = synchronized(headViewM) { webGazeUv(lastEffFwd) }
+        val still = synchronized(headViewM) { webStill.update(headViewM, nowMs) }
+        if (uv == null) { webPagePointOk = false; webPageDist = -1f; webProgF = maxOf(0f, webProgF - dtMs / 600f); return }
+
+        val dir = webBarDir(uv[0], uv[1])
+        // The shader zooms about the centre: undo it to reach the page pixel
+        // actually under the reticle (same zoom the picture is drawn with).
+        val z = flatZoomF()
+        val tu = 0.5f + (uv[0] - 0.5f) / z
+        val tv = 0.5f + (uv[1] - 0.5f) / z
+        val px = tu * webPageW
+        val py = (1f - tv) * webPageH
+        // The 3D point the ray actually hit. This is the SCREEN coord, not
+        // the texel: the shader zooms about the centre, so texel (tu,tv) is
+        // DISPLAYED at screen (uv). Placing the reticle at webPointAt(tu,tv)
+        // put it at the unzoomed texel position - wrong point as soon as
+        // zoom != 1, which is a depth error and a stereo one.
+        noteWebPagePoint(uv[0], uv[1])
+
+        // The dwell target is the STATE under the reticle, not the exact
+        // pixel: keying on pixel coordinates made every wobble of the head
+        // (VR jitter is never quite still) reset the dwell, so a link could
+        // never be stared at long enough to fire. The click still uses the
+        // live pixel, so it lands where you are actually looking.
+        val target = when {
+            dir != 0 -> "bar$dir"
+            webHitInteractive -> "hit"
+            else -> ""
+        }
+        // A hit answer is up to ~100 ms stale. Only distrust it if the gaze
+        // has genuinely gone somewhere else — a tight radius made the
+        // reticle flicker between "on a link" and "not" with every wobble,
+        // which reset the dwell forever and nothing ever fired.
+        if (webAskPx >= 0f &&
+            kotlin.math.hypot(px - webAskPx, py - webAskPy) > WEB_HIT_SLOP
+        ) webHitInteractive = false
+
+        if (target != webTarget) {
+            webTarget = target
+            webFiredFor = ""
+            // Blank page (or moved off a control) resets hard: the reticle
+            // must not stay shrunk with nothing to activate.
+            webProgF = if (target.isEmpty()) 0f else minOf(webProgF, 0.25f)
+        }
+        // Ask the page what is under the reticle (the answer lands in
+        // onWebHit). Throttled, and re-asked after firing so moving away and
+        // back is a fresh act.
+        // Keep the hit state live even after a fire: gating the refresh on
+        // the latch deadlocked it (the target can only change if we keep
+        // asking, so the first click froze dwell for the whole page).
+        if (dir == 0 && nowMs - webHitAskedAt > 100L) {
+            webHitAskedAt = nowMs
+            webHitToken++
+            webAskPx = px; webAskPy = py
+            onWebEvent(WebEvent.HitTest(webHitToken, px, py))
+        }
+        // Nothing to activate here: wait (the panel opens on gaze angle, not
+        // by staring at blank page).
+        if (target.isEmpty()) { webProgF = 0f; return }
+
+        if (webFiredFor == webTarget) webProgF = 1f   // held at full shrink until the gaze leaves
+        else if (still) webProgF += dtMs / dwellMs.toFloat()
+        else webProgF = maxOf(0f, webProgF - dtMs / 600f)
+        if (still && webProgF >= 1f && webFiredFor != webTarget) {
+            webFiredFor = webTarget
+            webProgF = 1f
+            FileLog.i("LimpetVR-web", "FIRE target=$webTarget px=$px py=$py")
+            when {
+                dir != 0 -> onWebEvent(WebEvent.Scroll(dir))
+                else -> onWebEvent(WebEvent.Click(px, py))
+            }
+            // Re-arm once the gaze leaves, so a second stare is a second act.
+        }
+    }
+
+    private fun webDwellProg(): Float = webProgF.coerceIn(0f, 1f)
+
+    /** TEMP DEBUG: where the gaze lands on the page, tracked every frame
+     *  INCLUDING while the web panel holds the gaze (otherwise the on-page
+     *  crosshair froze the moment you looked at the panel). */
+    /** The page pixel currently under the gaze, in world space. The reticle
+     *  is drawn AT this point, not at a distance along the ray, so it lands
+     *  on the same surface and converges with the page in both eyes. */
+    @Volatile private var webPagePoint = FloatArray(3)
+    @Volatile private var webPagePointOk = false
+    @Volatile private var webPageDist = -1f
+
+    /** World point on the ACTUAL page mesh at texture coord (u,v).
+     *
+     *  The mesh is a regular row-major grid, so the cell is found directly
+     *  from (u,v) instead of by hunting for a near vertex. The earlier
+     *  nearest-vertex search stepped the v-neighbour by ONE index, but in a
+     *  row-major grid the v-neighbour is a whole row away - so it
+     *  interpolated against another u-neighbour and the result snapped to
+     *  grid rows, which showed up as chunky vertical reticle motion while
+     *  horizontal stayed smooth.
+     *
+     *  Reading the real vertices (rather than the analytic webPointAt model)
+     *  means this cannot disagree with the surface actually drawn.
+     */
+    private fun webPointOnMesh(u: Float, v: Float, out: FloatArray): Boolean {
+        val m = mesh ?: return false
+        val vs = m.tex; val ps = m.verts
+        val nv = vs.capacity() / 2
+        if (nv < 4 || ps.capacity() < nv * 3) return false
+        fun tu(i: Int) = vs.get(i * 2)
+        fun tv(i: Int) = vs.get(i * 2 + 1)
+        fun pu(i: Int, k: Int) = ps.get(i * 3 + k)
+
+        // Row length: u climbs across a row and wraps at the row end.
+        var rowLen = 1
+        while (rowLen < nv && tu(rowLen) > tu(rowLen - 1)) rowLen++
+        if (rowLen < 2 || nv % rowLen != 0) return false
+        val rows = nv / rowLen
+        if (rows < 2) return false
+
+        // Which row does texture v belong to? Measured on the real mesh:
+        // row 0 carries v = 1 and the last row v = 0, so v = 1 is the FIRST
+        // row. Guessing this sign wrong mirrors the lookup vertically - and a
+        // crosshair cannot reveal it, being symmetric top-to-bottom.
+        val firstRowV = tv(0)
+        val lastRowV = tv((rows - 1) * rowLen)
+        val vIsRowIndex = firstRowV <= lastRowV   // v climbs down the rows
+
+        val fx = (u.coerceIn(0f, 1f)) * (rowLen - 1)
+        val fyRaw = (v.coerceIn(0f, 1f)) * (rows - 1)
+        val fy = if (vIsRowIndex) fyRaw else (rows - 1) - fyRaw
+
+        var cx = kotlin.math.floor(fx.toDouble()).toInt()
+        var cy = kotlin.math.floor(fy.toDouble()).toInt()
+        if (cx > rowLen - 2) cx = rowLen - 2
+        if (cx < 0) cx = 0
+        if (cy > rows - 2) cy = rows - 2
+        if (cy < 0) cy = 0
+        val ax = fx - cx
+        val ay = fy - cy
+
+        val i00 = cy * rowLen + cx
+        val i10 = i00 + 1
+        val i01 = i00 + rowLen
+        val i11 = i01 + 1
+        for (k in 0..2) {
+            val p00 = pu(i00, k); val p10 = pu(i10, k)
+            val p01 = pu(i01, k); val p11 = pu(i11, k)
+            val top = p00 + (p10 - p00) * ax
+            val bot = p01 + (p11 - p01) * ax
+            out[k] = top + (bot - top) * ay
+        }
+        // The mesh is drawn through modelM (the +0.25 lift, and the flat
+        // distance or cap z), so apply it here too or the point lands in the
+        // wrong space entirely.
+        buildVideoModel()
+        val wx = out[0]; val wy = out[1]; val wz = out[2]
+        out[0] = modelM[0] * wx + modelM[4] * wy + modelM[8] * wz + modelM[12]
+        out[1] = modelM[1] * wx + modelM[5] * wy + modelM[9] * wz + modelM[13]
+        out[2] = modelM[2] * wx + modelM[6] * wy + modelM[10] * wz + modelM[14]
+        return true
+    }
+
+    /** Gaze ray -> the web panel's surface. Writes the world point into
+     *  [out] and returns true ONLY when the ray genuinely lands inside the
+     *  panel rectangle.
+     *
+     *  Deliberately no clamping. Clamping the plane intersection to the rect
+     *  pinned the reticle to the panel edge whenever the gaze left the panel,
+     *  so it latched there and would not come back down until a recenter; and
+     *  a ray passing below the panel still hits the same infinite plane, just
+     *  on the far side, which flipped the reticle from below the page to
+     *  above it. Rejecting off-panel hits instead lets the reticle fall back
+     *  to the page, which is the surface actually being looked at. */
+    private fun webPanelPoint(out: FloatArray): Boolean {
+        val o = invHeadWorldM
+        val fwd = lastEffFwd
+        val d = panelDistM
+        val el = Math.toRadians(browserElevDeg.toDouble()).toFloat()
+        val cy = kotlin.math.sin(el) * d
+        val cz = -kotlin.math.cos(el) * d
+        var pny = -cy; var pnz = -cz
+        val pnl = kotlin.math.sqrt(pny * pny + pnz * pnz).coerceAtLeast(1e-6f)
+        pny /= pnl; pnz /= pnl
+        val denom = fwd[1] * pny + fwd[2] * pnz
+        if (denom >= -0.05f) return false      // edge-on or facing away
+        val t = ((cy - o[13]) * pny + (cz - o[14]) * pnz) / denom
+        if (t <= 0f) return false
+        val hx = o[12] + fwd[0] * t
+        val hy = o[13] + fwd[1] * t
+        val hz = o[14] + fwd[2] * t
+        val upx = 0f; val upy = pnz; val upz = -pny
+        val upl = kotlin.math.sqrt(upy * upy + upz * upz).coerceAtLeast(1e-6f)
+        val hw = panelHalfW(); val hh = panelHalfH()
+        val alongRight = hx
+        val alongUp = (hy - cy) * (upy / upl) + (hz - cz) * (upz / upl)
+        if (alongRight < -hw || alongRight > hw) return false
+        if (alongUp < -hh || alongUp > hh) return false
+        out[0] = hx; out[1] = hy; out[2] = hz
+        return true
+    }
+
+    /** Where the reticle was last drawn, and the eased position now being
+     *  drawn. The page and the panel are at very different depths (12 m vs
+     *  ~4 m), so switching surface snapped the reticle; easing over ~120 ms
+     *  turns that snap into a short glide without adding lag to normal
+     *  tracking, since the target itself is still followed every frame. */
+    private val webLastPoint = FloatArray(3)
+    @Volatile private var webLastPointOk = false
+    private val webSmoothPoint = FloatArray(3)
+    @Volatile private var webSmoothOk = false
+    private var webSmoothT = 0L
+
+    /** Places the reticle on the gaze RAY at [dist] from the head, seeded
+     *  from the current smoothed point so crossing into or out of the gap is
+     *  continuous. Used only where neither surface is under the gaze. */
+    private fun webReticleRay(dist: Float) {
+        val o = invHeadWorldM
+        val f = lastEffFwd
+        if (!webSmoothOk) {
+            for (i in 0..2) webSmoothPoint[i] = o[12 + i] + f[i] * dist
+            webSmoothOk = true
+        }
+        val nowMs = now()
+        val dt = ((nowMs - webSmoothT).coerceIn(0L, 100L)).toFloat() / 100f
+        webSmoothT = nowMs
+        val k = 1f - kotlin.math.exp(-dt / 0.12f)
+        for (i in 0..2) {
+            val t = o[12 + i] + f[i] * dist
+            webSmoothPoint[i] += (t - webSmoothPoint[i]) * k
+        }
+        webLastPoint[0] = webSmoothPoint[0]
+        webLastPoint[1] = webSmoothPoint[1]
+        webLastPoint[2] = webSmoothPoint[2]
+        webLastPointOk = true
+        Matrix.setIdentityM(tmpA, 0)
+        Matrix.translateM(tmpA, 0, webSmoothPoint[0], webSmoothPoint[1], webSmoothPoint[2])
+    }
+
+    /** Half-size of the reticle quad, from the distance to where it is
+     *  ACTUALLY drawn. Sizing from a nominal distance (the page depth or the
+     *  panel depth, whichever branch we took) is what made the reticle
+     *  shrink to about half when it was drawn on the far page using the
+     *  panel's near distance, and why a recenter appeared to "fix" it. */
+    private fun webRetS(sizeMul: Float, prog: Float): Float {
+        val hx = invHeadWorldM[12]; val hy = invHeadWorldM[13]; val hz = invHeadWorldM[14]
+        val dx = webSmoothPoint[0] - hx
+        val dy = webSmoothPoint[1] - hy
+        val dz = webSmoothPoint[2] - hz
+        val dist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(0.5f)
+        return kotlin.math.sin(RETICLE_ANG) * dist * sizeMul * (1f - 0.85f * prog.coerceIn(0f, 1f))
+    }
+
+    /** Builds tmpA for the reticle quad at [target], easing from the
+     *  previous position. Callers premultiply tmpA by ovM. */
+    private fun webReticleAt(target: FloatArray) {
+        val nowMs = now()
+        val dt = ((nowMs - webSmoothT).coerceIn(0L, 100L)).toFloat() / 100f
+        webSmoothT = nowMs
+        if (!webLastPointOk) {
+            System.arraycopy(target, 0, webLastPoint, 0, 3)
+            System.arraycopy(target, 0, webSmoothPoint, 0, 3)
+            webLastPointOk = true; webSmoothOk = true
+        } else {
+            System.arraycopy(target, 0, webLastPoint, 0, 3)
+            if (!webSmoothOk) {
+                System.arraycopy(target, 0, webSmoothPoint, 0, 3)
+                webSmoothOk = true
+            } else {
+                // Frame-rate independent exponential approach.
+                val k = 1f - kotlin.math.exp(-dt / 0.12f)
+                for (i in 0..2) webSmoothPoint[i] += (target[i] - webSmoothPoint[i]) * k
+            }
+        }
+        Matrix.setIdentityM(tmpA, 0)
+        Matrix.translateM(tmpA, 0, webSmoothPoint[0], webSmoothPoint[1], webSmoothPoint[2])
+    }
+
+    private fun noteWebPagePoint(u: Float, v: Float) {
+        // Off the page the mesh lookup clamps to the page edge, which parked
+        // the reticle there and made it pause in the gap above the page. The
+        // analytic form extends smoothly past the edge instead, so the target
+        // keeps moving and the reticle glides up into the panel.
+        if (u >= 0f && u <= 1f && v >= 0f && v <= 1f)
+            webPointOnMesh(u, v, webPagePoint)
+        else
+            webPointAt(u, v, webPagePoint)
+        val hx = invHeadWorldM[12]; val hy = invHeadWorldM[13]; val hz = invHeadWorldM[14]
+        val dx = webPagePoint[0] - hx
+        val dy = webPagePoint[1] - hy
+        val dz = webPagePoint[2] - hz
+        webPageDist = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+        webPagePointOk = true
+    }
+
+    fun updateWebDebugPoint() {
+        if (!webDbgOn || mode != Mode.WEB) return
+        val uv = synchronized(headViewM) { webGazeUv(lastEffFwd) } ?: return
+        val z = flatZoomF()
+        val tu = 0.5f + (uv[0] - 0.5f) / z
+        val tv = 0.5f + (uv[1] - 0.5f) / z
+        val px = tu * webPageW
+        val py = (1f - tv) * webPageH
+        webDebugPoint = floatArrayOf(px, py)
+        noteWebPagePoint(uv[0], uv[1])
+    }
+
+    /** Keep the web panel shut for a moment. The gaze is often still over it
+     *  right after it was used (a bookmark row, a recenter), and letting it
+     *  spring open again takes the gaze off the page it just loaded. */
+    fun webLockPanel() { webPanelHold = 0f; webPanelLockUntil = now() + (PANEL_TOGGLE_MS * 6).toLong() }
+
+    /** Forget the fired latch, so a freshly loaded page's links are dwellable
+     *  straight away. */
+    fun webResetDwell() {
+        webFiredFor = "\u0000none"
+        webTarget = ""
+        webProgF = 0f
+        webHitInteractive = false
+        webPanelHold = 0f
+    }
+
+    /** The web panel opens when the gaze actually goes UP ONTO it, and
+     *  closes when it goes back to the page — not on a head-tilt threshold.
+     *  A tilt gate was unusable: holding the phone leaves you permanently
+     *  past the threshold, so the panel stayed open, swallowed the gaze and
+     *  the page never got a single dwell. A short dwell on the panel also
+     *  stops a glance while turning from firing it. */
+    private fun updateWebPanelTilt() {
+        // Just recentred: whatever the gaze lands on, the page keeps it for
+        // a moment. Without this, recentring while looking at the panel let
+        // it reopen at once and swallow the gaze, and the page looked dead.
+        if (now() < webPanelLockUntil) { webPanelHold = 0f; return }
+        val onPanel = webGazeOnPanel()
+        val dt = (now() - webPanelT0).coerceIn(0L, 500L)
+        webPanelT0 = now()
+        if (onPanel) {
+            webPanelHold = minOf(1f, webPanelHold + dt / PANEL_TOGGLE_MS)
+            if (webPanelHold >= 1f && !webPanelOpen) {
+                webPanelOpen = true
+                FileLog.i("LimpetVR-web", "web panel open (gaze on panel)")
+                onWebEvent(WebEvent.Panel(true))
+            }
+        } else {
+            webPanelHold = maxOf(0f, webPanelHold - dt / PANEL_TOGGLE_MS)
+            if (webPanelHold <= 0f && webPanelOpen) {
+                webPanelOpen = false
+                FileLog.i("LimpetVR-web", "web panel close (gaze back on page)")
+                onWebEvent(WebEvent.Panel(false))
+            }
+        }
+    }
+
+    private fun webGazeOnPanel(): Boolean {
+        val o = invHeadWorldM
+        val fwd = lastEffFwd
+        val d = panelDistM
+        val el = Math.toRadians(browserElevDeg.toDouble()).toFloat()
+        val cy = kotlin.math.sin(el) * d
+        val cz = -kotlin.math.cos(el) * d
+        var pny = -cy; var pnz = -cz
+        val pnl = kotlin.math.sqrt(pny * pny + pnz * pnz).coerceAtLeast(1e-6f)
+        pny /= pnl; pnz /= pnl
+        val denom = fwd[1] * pny + fwd[2] * pnz
+        if (denom >= -0.05f) return false
+        val t = ((cy - o[13]) * pny + (cz - o[14]) * pnz) / denom
+        if (t <= 0f) return false
+        val hy = o[13] + fwd[1] * t
+        val hz = o[14] + fwd[2] * t
+        val upy = pnz; val upz = -pny
+        val upl = kotlin.math.sqrt(upy * upy + upz * upz).coerceAtLeast(1e-6f)
+        val alongRight = o[12] + fwd[0] * t
+        val alongUp = (hy - cy) * (upy / upl) + (hz - cz) * (upz / upl)
+        val hw = panelHalfW(); val hh = panelHalfH()
+        return alongRight >= -hw && alongRight <= hw && alongUp >= -hh && alongUp <= hh
+    }
+
+    /** The scrollbar: up/down arrows plus a thumb, drawn as a strip pinned
+     *  to the right edge of the (possibly curved) screen. */
+    private fun drawWebBar() {
+        if (!webScrollable) return
+        val key = screenCurve.toString() + "|" + screenSize.toString() + "|" +
+            webPageW + "x" + webPageH
+        if (webBarMesh == null || webBarMeshKey != key) {
+            webBarMesh = webBarMeshBuild()
+            webBarMeshKey = key
+        }
+        val m = webBarMesh ?: return
+        maybeUploadWebBar()
+        drawMesh2d(m, webBarTexId, ovM, 1f)
+    }
+
+    private val barP = FloatArray(3)
+    private val wpTmp = FloatArray(3)
+    private fun webBarMeshBuild(): Mesh {
+        // Pull the strip a few cm toward the viewer so it never z-fights
+        // the page underneath.
+        fun corner(u: Float, v: Float): FloatArray {
+            webPointAt(u, v, barP)
+            val len = kotlin.math.sqrt(barP[0] * barP[0] + barP[1] * barP[1] + barP[2] * barP[2])
+                .coerceAtLeast(1e-3f)
+            val k = (len - 0.05f) / len
+            return floatArrayOf(barP[0] * k, barP[1] * k, barP[2] * k)
+        }
+        // The strip bitmap's row 0 is its top (the up arrow), so the mesh
+        // maps it straight through: no flip.
+        return gridQuadP(
+            corner(barU0, barV1), corner(barU1, barV1),
+            corner(barU0, barV0), corner(barU1, barV0), 1, 1
+        )
+    }
+
+    private fun maybeUploadWebBar() {
+        val W = 64; val H = 1024
+        val bmp = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        c.drawColor(Color.TRANSPARENT)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.color = Color.argb(150, 10, 14, 22)
+        c.drawRoundRect(3f, 2f, (W - 3).toFloat(), (H - 2).toFloat(), 14f, 14f, p)
+        // arrows
+        p.color = Color.argb(245, 235, 240, 248)
+        val ay = BAR_ARROW / (barV1 - barV0) * H
+        fun tri(cy: Float, up: Boolean) {
+            val w = W * 0.34f
+            c.drawPath(Path().apply {
+                if (up) {
+                    moveTo(W / 2f, cy - ay * 0.30f); lineTo(W / 2f - w, cy + ay * 0.28f)
+                    lineTo(W / 2f + w, cy + ay * 0.28f)
+                } else {
+                    moveTo(W / 2f, cy + ay * 0.30f); lineTo(W / 2f - w, cy - ay * 0.28f)
+                    lineTo(W / 2f + w, cy - ay * 0.28f)
+                }
+                close()
+            }, p)
+        }
+        tri(ay * 0.5f, true)
+        tri(H - ay * 0.5f, false)
+        // thumb: size = visible fraction, position = scroll fraction
+        val frac = webScrollFrac.coerceIn(0f, 1f)
+        val view = webViewFrac.coerceIn(0.02f, 1f)
+        val thumbH = view * (H - 2 * ay)
+        val top = ay + (H - 2 * ay - thumbH) * frac
+        p.color = Color.argb(215, 125, 211, 252)
+        c.drawRoundRect(7f, top, (W - 7).toFloat(), (top + thumbH).toFloat(), 11f, 11f, p)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, webBarTexId)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+        webBarBitmap?.recycle()
+        webBarBitmap = bmp
+    }
+
     /** World size of the flat screen: aspect-corrected width/height for the
      *  plane (§5, base 8.5·screenSize). The shader samples ONE half of an
      *  SBS/TB frame, so the aspect is the per-eye content aspect, not the
-     *  full frame. Shared by buildVideoModel() and the curved-cap mesh. */
+     *  full frame. Shared by buildVideoModel() and the curved-cap mesh.
+     *  WEB borrows this path with the page's own aspect (and no stereo
+     *  split) so the browser sits on exactly the same screen as a video. */
     private fun screenDims(): Pair<Float, Float> {
-        val full = videoAspect.coerceIn(0.5f, 4f)
-        val a = when (stereo) { Stereo.SBS -> full / 2f; Stereo.TB -> full * 2f; else -> full }
+        val full = if (mode == Mode.WEB) webPageAspect() else videoAspect
+        val a = when (if (mode == Mode.WEB) Stereo.MONO else stereo) {
+            Stereo.SBS -> full / 2f; Stereo.TB -> full * 2f; else -> full
+        }
             .coerceIn(0.25f, 4f)
         val base = 8.5f * screenSize.coerceIn(0.5f, 10f)
         val w = if (a >= 1.7777778f) base else base / 1.7777778f * a
         return w to (w / a)
     }
+
+    /** WEB always rides the FLAT screen (same size/curve/zoom as 2D video),
+     *  whatever dome projection the video is set to. */
+    private fun effProj(): Projection = if (mode == Mode.WEB) Projection.FLAT else projection
+
+    private fun webPageAspect(): Float =
+        (webPageW.toFloat() / webPageH.toFloat().coerceAtLeast(1f)).coerceIn(0.25f, 4f)
 
     /** Model matrix for the video: FLAT = aspect-correct plane of world
      *  width 8.5·screenSize (unit quad scaled, §5) — or, when screenCurve
@@ -1972,7 +2789,7 @@ void main(){ gl_FragColor = texture2D(uTex, vTex) * uAlpha; }
      *  viewer by (zoom − 1). */
     private fun buildVideoModel() {
         Matrix.setIdentityM(modelM, 0)
-        if (projection == Projection.FLAT) {
+        if (effProj() == Projection.FLAT) {
             val (w, h) = screenDims()
             if (screenCurve > 0f) {
                 // Cap vertices already carry world w/h and their own z.

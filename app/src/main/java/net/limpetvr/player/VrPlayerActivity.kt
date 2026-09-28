@@ -19,6 +19,9 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.WindowManager
+import android.graphics.Bitmap
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.roundToInt
@@ -56,6 +59,10 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         const val EXTRA_PATH = "path"
         const val EXTRA_QUEUE_PATHS = "queue_paths"  // sibling files for prev/next
         const val EXTRA_QUEUE_INDEX = "queue_index"
+        /** Start straight in web mode (the 2D screen's "Enter Web"). */
+        const val EXTRA_WEB = "web"
+        /** Optional page to open with it. */
+        const val EXTRA_WEB_URL = "web_url"
         private const val TAG = "LimpetVR"
         /** Tag on the top twin of the phone-alignment marker. */
         private const val ALIGN_TWIN_TAG = "align-marker-twin"
@@ -372,6 +379,8 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         FileLog.i(TAG, "volatileProof frameAvailable=$volProof")
         android.util.Log.i(TAG, "volatileProof frameAvailable=$volProof")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // There is no keyboard in a headset: never let the IME come up.
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
         hideSystemBars()
         setContentView(R.layout.activity_vr)
         settings = SettingsStore(this)
@@ -391,12 +400,16 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         glView.setEGLContextClientVersion(2)
         renderer = VrRenderer(
             onBrowserActivate = { idx, frac -> runOnUiThread { activateRow(idx, frac) } },
-            onMenuEvent = { e -> runOnUiThread { handleMenuEvent(e) } }
+            onMenuEvent = { e -> runOnUiThread { handleMenuEvent(e) } },
+            onWebEvent = { e -> runOnUiThread { handleWebEvent(e) } }
         )
         applyOptics()
         renderer.projection = runCatching { Projection.valueOf(intent.getStringExtra(EXTRA_PROJ) ?: settings.projection.name) }.getOrDefault(settings.projection)
         renderer.stereo = runCatching { Stereo.valueOf(intent.getStringExtra(EXTRA_STEREO) ?: settings.stereo.name) }.getOrDefault(settings.stereo)
         syncGvr() // projection decides the neck model; IPD/lens too
+        // GVR's SurfaceView above the window content: the WebView can sit in
+        // the window (composited, capturable) without ever being seen.
+        findGvrSurface(glView)?.setZOrderOnTop(true)
         glView.setRenderer(renderer)
         // StereoRenderer drives both eyes; the SDK handles lens warp.
         glView.setStereoModeEnabled(true)
@@ -406,12 +419,8 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
             renderer.lastWidth = v.width.coerceAtLeast(1)
             renderer.lastHeight = v.height.coerceAtLeast(1)
         }
-        glView.setOnTouchListener { _, e ->
-            // Tap recenters silently: the world snapping is its own feedback.
-            // While the blue aim is armed the tap cancels it instead.
-            if (e.action == MotionEvent.ACTION_UP && !renderer.cancelAim()) renderer.recenter("tap")
-            true
-        }
+
+        setupWeb()
 
         sensors = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         // Prefer GAME rotation vector: gyro+accel only, no compass, so viewer
@@ -432,7 +441,10 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
 
         connId = intent.getStringExtra(EXTRA_CONN_ID) ?: SessionMemory.lastConnectionId
         val url = intent.getStringExtra(EXTRA_URL)
-        if (url != null) {
+        if (intent.getBooleanExtra(EXTRA_WEB, false)) {
+            // "Enter Web": no video, straight into the browser.
+            enterWeb(intent.getStringExtra(EXTRA_WEB_URL))
+        } else if (url != null) {
             playIsProxy = url.startsWith("http://127.0.0.1")
             // Direct launch (2D Watch play button): rebuild the prev/next
             // queue + remembered folder from the extras, exactly like the
@@ -483,6 +495,31 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
             }
             enterBrowser()
         }
+    }
+
+    /** GvrView is a FrameLayout; its GLSurfaceView/SurfaceView child is the
+     *  one that needs the z-order. Null if GVR ever stops using one. */
+    private fun findGvrSurface(v: android.view.ViewGroup): android.view.SurfaceView? {
+        for (i in 0 until v.childCount) {
+            val c = v.getChildAt(i)
+            if (c is android.view.SurfaceView) return c
+            if (c is android.view.ViewGroup) findGvrSurface(c)?.let { return it }
+        }
+        return null
+    }
+
+    /** Every tap in this window recentres. Handled here rather than on the
+     *  GL view because the web page now sits in the same window (PixelCopy
+     *  needs it composited) and would otherwise swallow taps over it. */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_UP && !renderer.cancelAim()) {
+            // Recentre = "reorient and start from the page": if the gaze is
+            // resting on the web panel it would keep the gaze there and the
+            // page looks dead until you look away from it.
+            if (renderer.mode == VrRenderer.Mode.WEB) closeWebPanel()
+            renderer.recenter("tap")
+        }
+        return super.dispatchTouchEvent(ev)
     }
 
     private fun applyOptics() {
@@ -601,7 +638,13 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         renderer.resetBasis("entry") // next sensor reading centers the view
         connections = ConnectionStore(this).load()
         // re-check the All-files toggle on return from Settings
-        try { refresh() } catch (_: Exception) {}
+        // (web mode owns the panel rows, so leave them alone there)
+        if (renderer.mode != VrRenderer.Mode.WEB) {
+            try { refresh() } catch (_: Exception) {}
+        }
+        mainHandler.removeCallbacks(webPump)
+        mainHandler.postDelayed(webPump, 400L)
+        webView?.onResume()
         glView.onResume()
         tuneAlignmentMarker() // idempotent: covers a UiLayer (re)inflate
         rotSensor?.let {
@@ -773,6 +816,8 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         stopSensorTick()
         stopTrace()
         player?.pause()
+        mainHandler.removeCallbacks(webPump)
+        webView?.onPause()
         super.onPause()
     }
 
@@ -1178,7 +1223,433 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
+    // ---------------- web ----------------
+    private var webView: WebView? = null
+    private var bookmarks: MutableList<WebBookmark> = mutableListOf()
+    private var webUrl = ""
+    /** Where web mode starts with no bookmark. */
+    private val WEB_HOME = "https://www.iana.org/help/example-domains"
+
+    private val WEB_SCHEMES = setOf("http", "https", "about", "data", "file", "javascript", "blob")
+
+    /** texture px per CSS px on the page (1 with the density-1 context). */
+    private var webDpr = 1f
+    private var webTitle = ""
+    private var webStateAt = 0L
+
+    /** JS shim the gaze code talks to: what is under the reticle, click it,
+     *  scroll by a viewport, and report scroll geometry for the scrollbar. */
+    private val webJs = """
+(function(){
+if (window.__limpet) return;
+function clickable(e){
+  for (var i=0; e && i<6; i++, e=e.parentElement){
+    var t=(e.tagName||'').toLowerCase();
+    if (t==='a'||t==='button'||t==='summary'||t==='details'||t==='label'||t==='video') return true;
+    if (e.onclick) return true;
+    if (e.getAttribute && e.getAttribute('role')==='button') return true;
+    try { if (getComputedStyle(e).cursor==='pointer') return true; } catch (x) {}
+  }
+  return false;
+}
+window.__limpet = {
+  hit: function(x,y){ try { return clickable(document.elementFromPoint(x,y)); } catch (e) { return false; } },
+  click: function(x,y){ try {
+      var el=document.elementFromPoint(x,y);
+      for (var i=0; el && i<6 && !clickable(el); i++) el=el.parentElement;
+      if (!el) return 'none';
+      try { el.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
+      // Replay what a real tap produces. Note: no extra el.click() — the
+      // sequence already ends with a click event, and doing both navigated
+      // the link twice.
+      var o = {bubbles:true, cancelable:true, view:window, clientX:x, clientY:y, button:0};
+      ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){
+        try { el.dispatchEvent(new MouseEvent(t, o)); } catch (e) {}
+      });
+      return (el.tagName||'?') + '.' + (el.className||'') + '|' + (el.href||'');
+  } catch (e) { return 'err:' + e; } },
+  scroll: function(f){ try { window.scrollBy(0, window.innerHeight*f); return true; } catch (e) { return false; } },
+  state: function(){ try {
+      var se=document.scrollingElement||document.documentElement;
+      var b=document.body;
+      // Some pages scroll the body, not the documentElement, and report
+      // scrollHeight==clientHeight there: take whichever is taller.
+      var sh=Math.max(se?se.scrollHeight:0, b?b.scrollHeight:0, b?b.offsetHeight:0);
+      var ch=window.innerHeight;
+      return JSON.stringify({sh:sh, ch:ch, st:window.scrollY,
+                             url:location.href, t:document.title}); } catch (e) { return '{}'; } }
+};
+/* "the page changed" counter, so a static page costs no captures at all */
+window.__limpetV = (window.__limpetV || 0) + 1;
+try {
+  new MutationObserver(function(){ window.__limpetV++; })
+    .observe(document.documentElement, {childList:true, subtree:true, attributes:true, characterData:true});
+  window.addEventListener('scroll', function(){ window.__limpetV++; }, {passive:true});
+} catch (e) {}
+})();
+"""
+
+    private fun setupWeb() {
+        val host = findViewById<android.view.ViewGroup>(R.id.webHost)
+        val wv = WebView(this)
+        // The page's CSS viewport is the WebView size divided by the display
+        // density (1600 px / 2.625 = 609 CSS px). The page still RASTERISES
+        // at 1600 px, so it is sharp; gaze coordinates just have to be
+        // divided by this to land on the right CSS pixel.
+        webDpr = wv.context.resources.displayMetrics.density.coerceAtLeast(0.1f)
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.settings.mediaPlaybackRequiresUserGesture = false
+        // The picture is zoomed by the GL screen, not by the page.
+        wv.settings.setSupportZoom(false)
+        wv.settings.builtInZoomControls = false
+        wv.settings.displayZoomControls = false
+        // The gaze scrollbar is ours.
+        wv.isVerticalScrollBarEnabled = false
+        wv.isHorizontalScrollBarEnabled = false
+        wv.setBackgroundColor(android.graphics.Color.BLACK)
+        wv.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, req: android.webkit.WebResourceRequest): Boolean {
+                val sc = req.url.scheme?.lowercase()
+                // http(s)/about/data/file stay in the page; anything else
+                // (intent://, market://, tel:) would hand off to Android and
+                // throw a chooser over the VR view, so swallow it.
+                return sc != null && sc !in WEB_SCHEMES
+            }
+
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                renderer.webResetDwell() // new page: its links must be dwellable
+                webUrl = url
+                renderer.webScrollable = false
+                renderer.webScrollFrac = 0f
+                webVersion++
+            }
+            override fun onPageFinished(view: WebView, url: String) {
+                view.evaluateJavascript(webJs, null)
+                webStateAt = 0L // don't let the throttle swallow this probe
+                webVersion++
+                pushWebState()
+            }
+        }
+        wv.setOnScrollChangeListener { _: View, _: Int, _: Int, _: Int, _: Int ->
+            webVersion++
+            pushWebState()
+        }
+        // The page sits in the window only so PixelCopy can read it, and the
+        // GL surface is drawn on top. It must not swallow touches: taps are
+        // how you recentre, and they were being eaten over the page area.
+        wv.isEnabled = false
+        wv.isFocusable = false
+        wv.isFocusableInTouchMode = false
+        wv.isClickable = false
+        host.addView(
+            wv,
+            android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        // Park it well off-screen. It stays VISIBLE and laid out (so Chromium
+        // keeps producing tiles for our raster), but the window never shows
+        // it — otherwise a single flat page image sits on top of the stereo
+        // view, in the headset as well as on the phone.
+        // The page lives on screen so PixelCopy can read the real composited
+        // surface (see pumpWeb). GVR's own SurfaceView is put on top of the
+        // window in onCreate, so none of this is ever visible.
+
+        webView = wv
+        bookmarks = BookmarkStore(this).load()
+        // The page's own size is the texture's aspect.
+        host.post {
+            val w = host.width.coerceAtLeast(64)
+            val h = host.height.coerceAtLeast(64)
+            renderer.webPageW = w
+            renderer.webPageH = h
+        }
+    }
+
+    /** Copy the page into a GL texture. PixelCopy reads what the window
+     *  actually composited, so this sees GPU-rendered web content (a plain
+     *  Bitmap draw would not). Driven by a JS "something changed" counter so
+     *  a static page costs nothing. */
+    private var webVersion = 0
+    private var webVersionSeen = -1
+    private var webLastRasterAt = 0L
+    private var webCopyMs = -1L
+    private var webCopyBusy = false
+    private var webCopySlot = 0
+    private var webRectLogged = false
+    private val webBmps = arrayOfNulls<Bitmap>(2)
+
+    /** Capture pump. Web pages repaint on their own schedule, so the page
+     *  tells us when it changed (a JS counter) and only then do we pay for
+     *  a PixelCopy + upload. */
+    private val webPump = object : Runnable {
+        override fun run() {
+            // Reschedule FIRST: a throw inside the body used to kill the
+            // pump for good, and the page froze at its first frame.
+            mainHandler.postDelayed(this, 250L)
+            if (renderer.mode != VrRenderer.Mode.WEB) return
+            try {
+                pollPageVersion()
+                pumpWeb()
+            } catch (t: Throwable) {
+                FileLog.i("LimpetVR-web", "pump error: $t")
+            }
+        }
+    }
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var webPageVersion = -1
+
+    private fun pollPageVersion() {
+        val wv = webView ?: return
+        wv.evaluateJavascript("String(window.__limpetV||0)") { r ->
+            val n = r?.trim()?.toIntOrNull() ?: return@evaluateJavascript
+            if (n != webPageVersion) { webPageVersion = n; webVersion++ }
+        }
+    }
+
+    /** Capture the page for the VR screen.
+     *
+     *  PixelCopy of the window is the only reliable source: WebView.draw()
+     *  re-records the view on the CPU, and once Chromium has scrolled the
+     *  page it only re-rasters what is newly exposed — that produced the
+     *  "mostly white with a strip of text" picture. PixelCopy reads what the
+     *  window actually composited, so it is always the whole page.
+     *
+     *  Two bitmasks in rotation: the GL thread uploads on its own frame, so
+     *  the next copy must not land in the bitmap still being uploaded. */
+    private fun pumpWeb() {
+        val wv = webView ?: return
+        if (renderer.mode != VrRenderer.Mode.WEB || webCopyBusy) return
+        // Debug builds keep re-capturing so the crosshair tracks the gaze.
+        val tick = BuildConfig.DEBUG &&
+            android.os.SystemClock.elapsedRealtime() - webLastRasterAt > 300L
+        if (webVersion == webVersionSeen && !tick) return
+        webVersionSeen = webVersion
+        webLastRasterAt = android.os.SystemClock.elapsedRealtime()
+        val v = wv
+        if (v.width <= 0 || v.height <= 0) return
+
+        // PixelCopy on a Window takes WINDOW coordinates, and the page sits
+        // centred in the landscape window — so ask the view where it is.
+        val loc = IntArray(2)
+        v.getLocationInWindow(loc)
+        val ww = window.decorView.width
+        val wh = window.decorView.height
+        val x0 = loc[0].coerceIn(0, maxOf(0, ww - 1))
+        val y0 = loc[1].coerceIn(0, maxOf(0, wh - 1))
+        val x1 = (loc[0] + v.width).coerceIn(x0 + 1, maxOf(x0 + 1, ww))
+        val y1 = (loc[1] + v.height).coerceIn(y0 + 1, maxOf(y0 + 1, wh))
+        val cw = x1 - x0
+        val ch = y1 - y0
+        if (cw <= 0 || ch <= 0) return
+
+        val slot = (webCopySlot + 1) % 2
+        var bmp = webBmps[slot]
+        if (bmp == null || bmp.width != cw || bmp.height != ch) {
+            bmp?.recycle()
+            bmp = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888)
+            webBmps[slot] = bmp
+            renderer.webPageW = cw
+            renderer.webPageH = ch
+        }
+        val dest = bmp
+        val rect = android.graphics.Rect(x0, y0, x1, y1)
+        if (BuildConfig.DEBUG && !webRectLogged) {
+            webRectLogged = true
+            FileLog.i("LimpetVR-web", "rect=${rect.left},${rect.top},${rect.right},${rect.bottom} " +
+                "view=${v.width}x${v.height} at ${loc[0]},${loc[1]} window=${ww}x${wh}")
+        }
+        webCopyBusy = true
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        try {
+            android.view.PixelCopy.request(window, rect, dest, { result ->
+                webCopyBusy = false
+                if (result != android.view.PixelCopy.SUCCESS) return@request
+                if (BuildConfig.DEBUG) renderer.webDebugPoint?.let { dp -> drawWebCrosshair(dest, dp) }
+                renderer.submitWebFrame(dest)
+                webCopyMs = android.os.SystemClock.elapsedRealtime() - t0
+            }, android.os.Handler(android.os.Looper.getMainLooper()))
+        } catch (t: Throwable) {
+            webCopyBusy = false
+            FileLog.i("LimpetVR-web", "capture failed: $t")
+        }
+    }
+
+    /** TEMP DEBUG crosshair: where the gaze is sampling, burned into the
+     *  captured page so it can be compared with the reticle. */
+    private fun drawWebCrosshair(bmp: Bitmap, dp: FloatArray) {
+        try {
+            val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+            p.style = android.graphics.Paint.Style.STROKE
+            p.strokeWidth = 5f
+            p.color = android.graphics.Color.RED
+            val c = android.graphics.Canvas(bmp)
+            c.drawCircle(dp[0], dp[1], 22f, p)
+            c.drawLine(dp[0] - 34f, dp[1], dp[0] + 34f, dp[1], p)
+            c.drawLine(dp[0], dp[1] - 34f, dp[0], dp[1] + 34f, p)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun jsNum(v: Float) = String.format(java.util.Locale.US, "%.1f", v)
+
+    /** Throttled: geometry for the scrollbar thumb + the current title. */
+    private fun pushWebState() {
+        val wv = webView ?: return
+        val t = System.currentTimeMillis()
+        if (t - webStateAt < 120L) return
+        webStateAt = t
+        wv.evaluateJavascript("window.__limpet?__limpet.state():'{}'") { res ->
+            // evaluateJavascript hands back a JSON-*encoded* string, so the
+            // inner quotes arrive escaped: unwrap with a real parser (a
+            // removePrefix left \" behind and every parse silently failed,
+            // which is why the title and the scrollbar never showed).
+            val inner = try {
+                (org.json.JSONTokener(res ?: return@evaluateJavascript).nextValue() as? String)
+                    ?: return@evaluateJavascript
+            } catch (_: Exception) {
+                return@evaluateJavascript
+            }
+            if (inner.length < 2) return@evaluateJavascript
+            try {
+                val o = org.json.JSONObject(inner)
+                val sh = o.optDouble("sh", 0.0)
+                val ch = o.optDouble("ch", 1.0).coerceAtLeast(1.0)
+                val st = o.optDouble("st", 0.0)
+                renderer.webScrollable = sh > ch + 4.0
+                renderer.webViewFrac = (ch / sh).coerceIn(0.02, 1.0).toFloat()
+                renderer.webScrollFrac =
+                    if (sh > ch) (st / (sh - ch)).coerceIn(0.0, 1.0).toFloat() else 0f
+                webUrl = o.optString("url", webUrl)
+                val ti = o.optString("t", "")
+                if (ti.isNotEmpty()) webTitle = ti
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+
+    /** Gaze on the page: ask what is there, click it, scroll, open the panel. */
+    private fun handleWebEvent(e: VrRenderer.WebEvent) {
+        val wv = webView ?: return
+        when (e) {
+            is VrRenderer.WebEvent.HitTest ->
+                wv.evaluateJavascript("window.__limpet?__limpet.hit(${jsNum(e.px / webDpr)},${jsNum(e.py / webDpr)}):false") { r ->
+                            renderer.onWebHit(e.token, r?.contains("true") == true)
+                }
+            is VrRenderer.WebEvent.Click -> {
+                // A click navigates: re-arm so the next page's links work.
+                renderer.webResetDwell()
+                wv.evaluateJavascript("window.__limpet?__limpet.click(${jsNum(e.px / webDpr)},${jsNum(e.py / webDpr)}):'noshim'") { r ->
+                    FileLog.i("LimpetVR-web", "click at ${e.px.toInt()},${e.py.toInt()} -> $r")
+                }
+            }
+            is VrRenderer.WebEvent.Scroll ->
+                wv.evaluateJavascript("window.__limpet?__limpet.scroll(${if (e.dir > 0) "0.9" else "-0.9"}):false", null)
+            is VrRenderer.WebEvent.Panel -> if (e.open) openWebPanel() else closeWebPanel()
+        }
+    }
+
+    /** Into web mode. The video keeps its position (paused) so the web panel
+     *  can hand it back. */
+    private fun enterWeb(url: String? = null) {
+        val wv = webView
+        if (wv == null) { toast("Web view unavailable"); return }
+        player?.pause()
+        renderer.webPanelOpen = false
+        // Put the panel where it will be drawn from the start: the gaze test
+        // aims at it, and at elevation 0 it would sit right on the page.
+        renderer.browserElevDeg = renderer.overlayElevDeg()
+        renderer.mode = VrRenderer.Mode.WEB
+        wv.onResume()
+        val want = normalizeUrl(url ?: webUrl.ifBlank {
+            bookmarks.firstOrNull()?.url ?: WEB_HOME
+        })
+        if (want.isNotEmpty() && want != webUrl) wv.loadUrl(want)
+        FileLog.i("LimpetVR-web", "enterWeb url=$want have=${player != null}")
+        if (BuildConfig.DEBUG) renderer.webDbgOn = true // TEMP DEBUG: gaze crosshair
+    }
+
+    /** Back to video, resuming whatever was playing. With no video there is
+     *  nothing to go back to, so the file browser takes over. */
+    private fun exitWeb() {
+        renderer.webPanelOpen = false
+        settingsFromVideo = false
+        if (player != null) {
+            renderer.mode = VrRenderer.Mode.VIDEO
+            player?.play()
+        } else {
+            loc = Loc.Root
+            renderer.mode = VrRenderer.Mode.BROWSER
+            refresh()
+        }
+        webView?.onPause()
+    }
+
+    private fun openWebPanel() {
+        bookmarks = BookmarkStore(this).load()
+        val r = mutableListOf<Row>()
+        r += Row(
+            "▶ Video",
+            if (player != null) "Resume playback" else "No video playing",
+            VrRenderer.BrowserRow.ACTION, action = "webvideo"
+        )
+        r += Row("Zoom in", "${"%.2f".format(settings.videoZoom)}×", VrRenderer.BrowserRow.ACTION, action = "webzoom+")
+        r += Row("Zoom out", "${"%.2f".format(settings.videoZoom)}×", VrRenderer.BrowserRow.ACTION, action = "webzoom-")
+        // Debug gaze crosshair. Toggleable: it is burned into the page
+        // bitmap, so it sits on the page surface and can be mistaken for a
+        // convergence problem (or cause one) while judging depth.
+        r += Row(
+            "Gaze crosshair",
+            if (renderer.webDbgOn) "On" else "Off",
+            VrRenderer.BrowserRow.ACTION, action = "webxhair"
+        )
+        for (b in bookmarks) {
+            r += Row(
+                b.title.ifBlank { b.url },
+                b.url, VrRenderer.BrowserRow.ACTION, action = "weburl:${b.url}"
+            )
+        }
+        pushRows(webTitle.ifBlank { "Web" }, "", r)
+        renderer.browserElevDeg = renderer.overlayElevDeg()
+        renderer.webPanelOpen = true
+    }
+
+    private fun closeWebPanel() {
+        renderer.webPanelOpen = false
+    }
+
+    private fun webZoom(dir: Int) {
+        settings.videoZoom = (settings.videoZoom * if (dir > 0) 1.25f else 0.8f).coerceIn(0.1f, 20f)
+        applyOptics()
+    }
+
     private fun activateRow(idx: Int, frac: Float? = null) {
+        if (renderer.mode == VrRenderer.Mode.WEB) {
+            // X closes the panel (never the web mode itself).
+            if (idx == -10) { closeWebPanel(); return }
+            val a = rows.getOrNull(idx)?.action ?: return
+            when {
+                a == "webvideo" -> if (player != null) { closeWebPanel(); exitWeb() } else toast("No video playing")
+                a == "webzoom+" -> webZoom(+1)
+                a == "webzoom-" -> webZoom(-1)
+                a == "webxhair" -> {
+                    renderer.webDbgOn = !renderer.webDbgOn
+                    // Reopen so the row's On/Off label updates in place.
+                    openWebPanel()
+                    toast(if (renderer.webDbgOn) "Crosshair on" else "Crosshair off")
+                }
+                a.startsWith("weburl:") -> {
+                    closeWebPanel()
+                    renderer.webLockPanel() // gaze is still on the panel: keep it there
+                    val wv = webView
+                    if (wv != null) wv.loadUrl(a.removePrefix("weburl:"))
+                }
+            }
+            return
+        }
         if (idx == -10) { if (renderer.mode == VrRenderer.Mode.BROWSER) closeOverlay(); return }
         if (idx !in rows.indices || renderer.mode != VrRenderer.Mode.BROWSER) return
         // Debug page: frozen except X, so staring at numbers is safe.
@@ -1570,6 +2041,7 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
                     refresh()
                 }
                 2 -> enterBrowser() // 3D file browser, opens the playing file's folder
+                18 -> enterWeb() // web browser; the video keeps its place
                 3 -> stepQueue(-1)
                 4 -> p.seekTo((p.currentPosition - settings.skipSecs * 1000).coerceAtLeast(0))
                 5 -> p.playWhenReady = !p.playWhenReady

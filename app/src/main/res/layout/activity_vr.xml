@@ -6,6 +6,13 @@
     <com.google.vr.sdk.base.GvrView
         android:id="@+id/glView"
         android:layout_width="match_parent" android:layout_height="match_parent" />
+    <!-- Web mode: the page lives here at 1600x900 and is copied into a GL
+         texture (PixelCopy) for the flat screen. It stays visible on the
+         phone screen as a mirror; inside the headset you never see it. -->
+    <FrameLayout
+        android:id="@+id/webHost"
+        android:layout_width="1600px" android:layout_height="900px"
+        android:layout_gravity="center" />
     <TextView
         android:id="@+id/btnClose"
         android:layout_width="30dp" android:layout_height="30dp"

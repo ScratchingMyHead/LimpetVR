@@ -5,5 +5,7 @@
     <string name="tab_display">Settings</string>
     <string name="add_connection">Add connection</string>
     <string name="enter_vr">Enter VR</string>
+    <string name="enter_web">Enter Web</string>
+    <string name="tab_urls">URLs</string>
     <string name="play_in_vr">Play in VR</string>
 </resources>
