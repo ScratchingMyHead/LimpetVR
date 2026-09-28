@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.RadioButton
 import android.widget.TextView
@@ -78,7 +79,8 @@ class MainActivity : AppCompatActivity() {
             if (p != null) openSdDirect(p) else openLocalRoot()
         } else Toast.makeText(this, "Videos permission needed for Internal Storage", Toast.LENGTH_LONG).show()
     }
-    /** SD path awaiting the media permission before the full-access check. */
+    /** SD path awaiting the media permission, or the return from the
+     *  All-files Settings toggle (auto-opens on the next render). */
     private var pendingSdPath: String? = null
 
     // SAF (SD card) folder picker state: volume awaiting a grant.
@@ -283,6 +285,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderWatch() {
         val v = watchView ?: return
+        // Back from the All-files Settings toggle with a pending SD root:
+        // drop straight into it (other file managers do the same) — unless
+        // the user has navigated elsewhere meanwhile.
+        val pend = pendingSdPath
+        if (pend != null && wloc is WLoc.Root) {
+            pendingSdPath = null
+            val d = File(pend)
+            if (!LocalFiles.needsPermission(this) && d.isDirectory && !LocalFiles.sdBlocked(this, d))
+                wloc = WLoc.Local(d)
+        }
         v.findViewById<TextView>(R.id.txtPath).text = watchTitle()
         when (val l = wloc) {
             is WLoc.Root -> {
@@ -405,15 +417,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Open an SD volume root directly; fires the media permission, then
-     *  the All-files settings toggle, only when each is actually missing. */
+     *  the All-files access dialog, only when each is actually missing. */
     private fun openSdDirect(path: String) {
         if (LocalFiles.needsPermission(this)) {
             pendingSdPath = path
             permLauncher.launch(LocalFiles.requestPermission()); return
         }
         val dir = java.io.File(path)
-        if (LocalFiles.sdBlocked(this, dir)) { LocalFiles.requestFullAccess(this); return }
+        if (LocalFiles.sdBlocked(this, dir)) {
+            pendingSdPath = path
+            showSdAccessDialog(path); return
+        }
+        pendingSdPath = null
         wloc = WLoc.Local(dir); renderWatch()
+    }
+
+    /** Why-tap SD flow: direct File browsing needs the All-files toggle
+     *  (a Settings page — Android offers no popup for this grant), so say
+     *  so up front and offer the SAF folder picker as the fallback. */
+    private fun showSdAccessDialog(path: String) {
+        val dir = java.io.File(path)
+        val uuid = dir.name // XXXX-XXXX volume id; matches SAF tree docIds
+        val label = SafFiles.removableVolumes(this).find { it.uuid == uuid }?.desc
+            ?: LocalFiles.volumeRoots(this).find { it.dir.absolutePath == dir.absolutePath }?.label
+            ?: "SD card ($uuid)"
+        MaterialAlertDialogBuilder(this)
+            .setTitle("SD card access")
+            .setMessage("To browse the whole SD card directly, turn on " +
+                "\"Allow all files access\" for LimpetVR on the next screen, then come back here.\n\n" +
+                "Or pick a single folder instead — no full access needed.")
+            .setPositiveButton("Open Settings") { _, _ -> LocalFiles.requestFullAccess(this) }
+            .setNegativeButton("Pick a folder") { _, _ ->
+                pendingSdPath = null
+                openSafVolume(SafFiles.VolumeInfo(uuid, label))
+            }
+            .setNeutralButton("Cancel", null)
+            .show()
     }
 
     private fun playWatchEntry(e: WatchEntry) {
@@ -606,6 +645,7 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+            .also { it.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE) }
     }
 
     // ---------- Display ----------
