@@ -1317,6 +1317,14 @@ window.__limpet = {
         if (r.height < 40 || r.width < 40) continue;
         if (r.bottom < 0 || r.top > window.innerHeight) continue;
         var a = r.width * r.height;
+        // A real scroll container wins outright. Without this the largest
+        // any-overflow element wins, and on many sites that is a full-page
+        // wrapper with overflow-y:visible, which SHADOWS the actual inner
+        // scroller - so page() sets scrollTop on something that cannot
+        // scroll and never finds the one that can.
+        var oy = '';
+        try { oy = getComputedStyle(e).overflowY; } catch (err) {}
+        if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') a *= 1000;
         if (a > area) { area = a; best = e; }
       }
     } catch (err) {}
@@ -1848,6 +1856,38 @@ try {
     private fun jsNum(v: Float) = String.format(java.util.Locale.US, "%.1f", v)
 
     /** Throttled: geometry for the scrollbar thumb + the current title. */
+    /** Scroll the page one page-key, for BOTH the PgUp/PgDn buttons and the
+     *  scrollbar arrows - they are the same gesture and must behave the same.
+     *
+     *  The WebView's OWN key handling goes first. A synthetic JS
+     *  KeyboardEvent has no default action, so it can never scroll
+     *  anything; only reaches handlers the site bound itself. The hardware
+     *  PageDown key does scroll, because WebView handles the key natively
+     *  and drives the focused scroller, so that is the route to reuse.
+     *
+     *  Measured on a consent-walled page, where every JS fallback missed:
+     *  scroller() returned DIV.pageWrapper - overflow-y:visible with 70px of
+     *  rounding overflow, not a scroller at all - so setting its scrollTop
+     *  did nothing; window.scrollBy found nothing (doc 343/343); and the
+     *  wheel went to whatever sat at the viewport centre, which is not the
+     *  scroller. The hardware key scrolled it, so a real scroller exists.
+     *
+     *  The JS attempts still run afterwards, for pages the native path
+     *  ignores. */
+    private fun webPageScroll(dir: Int) {
+        val wv = webView ?: return
+        wv.evaluateJavascript("window.__limpet?__limpet.diag():'d'", { d ->
+            FileLog.i("LimpetVR-web", "PAGEDIR=$dir $d")
+        })
+        val kc = if (dir > 0) KeyEvent.KEYCODE_PAGE_DOWN else KeyEvent.KEYCODE_PAGE_UP
+        val t = System.currentTimeMillis()
+        wv.dispatchKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, kc, 0))
+        wv.dispatchKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, kc, 0))
+        FileLog.i("LimpetVR-web", "native key $kc")
+        wv.evaluateJavascript("window.__limpet?__limpet.key($dir):false", null)
+        wv.evaluateJavascript("window.__limpet?__limpet.page($dir):false", null)
+    }
+
     private fun pushWebState() {
         val wv = webView ?: return
         val t = System.currentTimeMillis()
@@ -1898,38 +1938,9 @@ try {
                     FileLog.i("LimpetVR-web", "click at ${e.px.toInt()},${e.py.toInt()} -> $r")
                 }
             }
-            is VrRenderer.WebEvent.Scroll ->
-                wv.evaluateJavascript("window.__limpet?__limpet.scroll(${if (e.dir > 0) "0.9" else "-0.9"}):false", null)
+            is VrRenderer.WebEvent.Scroll -> webPageScroll(e.dir)
             is VrRenderer.WebEvent.Panel -> if (e.open) openWebPanel() else closeWebPanel()
-            is VrRenderer.WebEvent.PageKey -> {
-                wv.evaluateJavascript(
-                    "window.__limpet?__limpet.diag():'d'", { d ->
-                        FileLog.i("LimpetVR-web", "PAGEDIR=${e.dir} $d")
-                    })
-                // The WebView's OWN key handling first. A synthetic JS
-                // KeyboardEvent has no default action, so it cannot scroll
-                // anything; the hardware PageDown key can, because WebView
-                // handles it natively and drives the focused scroller. That
-                // path is what the panel button has to use.
-                //
-                // Measured on a consent-walled page: the JS fallbacks all
-                // miss it. scroller() picks the largest element with any
-                // overflow, which is DIV.pageWrapper with overflow-y:visible
-                // and 70px of rounding overflow - not a scroller at all.
-                // window.scrollBy finds nothing (doc 343/343) and the wheel
-                // goes to the element under the viewport centre, which is not
-                // the scroller. The hardware key scrolls it, so it exists.
-                val kc = if (e.dir > 0) KeyEvent.KEYCODE_PAGE_DOWN
-                         else KeyEvent.KEYCODE_PAGE_UP
-                val t = System.currentTimeMillis()
-                wv.dispatchKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, kc, 0))
-                wv.dispatchKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, kc, 0))
-                // JS attempts after it, for pages the native path ignores.
-                wv.evaluateJavascript(
-                    "window.__limpet?__limpet.key(${e.dir}):false", null)
-                wv.evaluateJavascript(
-                    "window.__limpet?__limpet.page(${e.dir}):false", null)
-            }
+            is VrRenderer.WebEvent.PageKey -> webPageScroll(e.dir)
         }
     }
 
