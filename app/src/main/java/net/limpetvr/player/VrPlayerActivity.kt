@@ -1906,8 +1906,25 @@ try {
                     "window.__limpet?__limpet.diag():'d'", { d ->
                         FileLog.i("LimpetVR-web", "PAGEDIR=${e.dir} $d")
                     })
-                // Send the real key first (sites listen for it), then move the
-                // scroller, since a synthetic key has no default scroll.
+                // The WebView's OWN key handling first. A synthetic JS
+                // KeyboardEvent has no default action, so it cannot scroll
+                // anything; the hardware PageDown key can, because WebView
+                // handles it natively and drives the focused scroller. That
+                // path is what the panel button has to use.
+                //
+                // Measured on a consent-walled page: the JS fallbacks all
+                // miss it. scroller() picks the largest element with any
+                // overflow, which is DIV.pageWrapper with overflow-y:visible
+                // and 70px of rounding overflow - not a scroller at all.
+                // window.scrollBy finds nothing (doc 343/343) and the wheel
+                // goes to the element under the viewport centre, which is not
+                // the scroller. The hardware key scrolls it, so it exists.
+                val kc = if (e.dir > 0) KeyEvent.KEYCODE_PAGE_DOWN
+                         else KeyEvent.KEYCODE_PAGE_UP
+                val t = System.currentTimeMillis()
+                wv.dispatchKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_DOWN, kc, 0))
+                wv.dispatchKeyEvent(KeyEvent(t, t, KeyEvent.ACTION_UP, kc, 0))
+                // JS attempts after it, for pages the native path ignores.
                 wv.evaluateJavascript(
                     "window.__limpet?__limpet.key(${e.dir}):false", null)
                 wv.evaluateJavascript(
