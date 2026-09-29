@@ -2336,9 +2336,18 @@ void main(){
     /** Scrollbar strip geometry, in screen texture space. Fixed, so the
      *  mesh only rebuilds when the screen (curve/size) changes. The strip is
      *  deliberately wide and the arrows tall: they are the only gaze targets
-     *  on the page, and a few pixels of head wobble used to mean "miss". */
-    private val barU0 = 0.930f
-    private val barU1 = 0.994f
+     *  on the page, and a few pixels of head wobble used to mean "miss".
+     *
+     *  u > 1 puts the strip just OUTSIDE the right edge of the screen. It used
+     *  to sit inside the page (0.930-0.994), which was invisible while the
+     *  page was zoomed in and smaller than the screen, but now that the page
+     *  always fills the screen exactly, an inside strip lies on top of the
+     *  page's right-hand content. Outside, it stays adjacent to the page
+     *  edge with nothing covered. webPointAt extrapolates linearly past the
+     *  screen (and round the cap when curved), so u > 1 is a real position
+     *  just beyond the surface, not a clamp. */
+    private val barU0 = 1.010f
+    private val barU1 = 1.074f
     private val barV0 = 0.010f
     private val barV1 = 0.990f
     private val BAR_ARROW = 0.090f
