@@ -1385,12 +1385,21 @@ try {
      *  a static page costs nothing. */
     private var webVersion = 0
     private var webVersionSeen = -1
+    /** Capture pump period. ~30 fps. */
+    private val WEB_PUMP_MS = 33L
     private var webLastRasterAt = 0L
     private var webCopyMs = -1L
     private var webCopyBusy = false
     private var webCopySlot = 0
     private var webRectLogged = false
     private val webBmps = arrayOfNulls<Bitmap>(2)
+    // EXPERIMENT telemetry
+    private var webCopiesDone = 0
+    private var webCopyTotalMs = 0L
+    private var webCopyMaxMs = 0L
+    private var webFpsLogAt = 0L
+    private var webFpsFrom = 0
+    private var webFpsFromAt = 0L
 
     /** Capture pump. Web pages repaint on their own schedule, so the page
      *  tells us when it changed (a JS counter) and only then do we pay for
@@ -1399,7 +1408,14 @@ try {
         override fun run() {
             // Reschedule FIRST: a throw inside the body used to kill the
             // pump for good, and the page froze at its first frame.
-            mainHandler.postDelayed(this, 250L)
+            // ~30 fps. This was 250 ms, a hard 4 fps ceiling, which capped
+            // video playback no matter what else was true. Measured PixelCopy
+            // cost at 1600x900 is 0.1-2 ms, so copying every tick is cheap and
+            // the old "static page costs nothing" gate was optimising
+            // something that was never expensive - while making the page
+            // miss any change that did not mutate the DOM (video, CSS
+            // animations, canvas, WebGL).
+            mainHandler.postDelayed(this, WEB_PUMP_MS)
             if (renderer.mode != VrRenderer.Mode.WEB) return
             try {
                 pollPageVersion()
@@ -1433,11 +1449,9 @@ try {
     private fun pumpWeb() {
         val wv = webView ?: return
         if (renderer.mode != VrRenderer.Mode.WEB || webCopyBusy) return
-        // Debug builds keep re-capturing so the crosshair tracks the gaze.
-        val tick = BuildConfig.DEBUG &&
-            android.os.SystemClock.elapsedRealtime() - webLastRasterAt > 300L
-        if (webVersion == webVersionSeen && !tick) return
-        webVersionSeen = webVersion
+        // No change-detection gate: capture on every tick. A copy in flight
+        // is not overwritten (webCopyBusy) and the busy flag paces us to
+        // whatever the hardware can actually sustain.
         webLastRasterAt = android.os.SystemClock.elapsedRealtime()
         val v = wv
         if (v.width <= 0 || v.height <= 0) return
@@ -1481,6 +1495,21 @@ try {
                 if (BuildConfig.DEBUG) renderer.webDebugPoint?.let { dp -> drawWebCrosshair(dest, dp) }
                 renderer.submitWebFrame(dest)
                 webCopyMs = android.os.SystemClock.elapsedRealtime() - t0
+                webCopiesDone++
+                webCopyTotalMs += webCopyMs
+                if (webCopyMs > webCopyMaxMs) webCopyMaxMs = webCopyMs
+                val nowMs = android.os.SystemClock.elapsedRealtime()
+                if (nowMs - webFpsLogAt > 2000L) {
+                    val span = ((nowMs - webFpsFromAt).coerceAtLeast(1L)) / 1000f
+                    val n = webCopiesDone - webFpsFrom
+                    FileLog.i("LimpetVR-web", "TELE " +
+                        "fps=${"%.1f".format(n / span)} " +
+                        "copyMs avg=${"%.1f".format(webCopyTotalMs.toFloat() / webCopiesDone.coerceAtLeast(1))} " +
+                        "max=$webCopyMaxMs total=${webCopiesDone}")
+                    webFpsLogAt = nowMs; webFpsFrom = webCopiesDone
+                    webFpsFromAt = nowMs
+                    webCopyTotalMs = 0L; webCopyMaxMs = 0L
+                }
             }, android.os.Handler(android.os.Looper.getMainLooper()))
         } catch (t: Throwable) {
             webCopyBusy = false
