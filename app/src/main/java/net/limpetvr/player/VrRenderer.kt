@@ -1433,6 +1433,18 @@ void main(){
      *  slide their sphere toward the viewer instead and upload 1 here. */
     private fun flatZoomF(): Float = zoom.coerceIn(0.1f, 20f)
 
+    /** Texture zoom for the web page: always 1.
+     *
+     *  The page capture is 16:9 and screenDims() builds a 16:9 screen for
+     *  it, so the texture covers the surface exactly - there is never
+     *  anything to crop, and magnifying the page is what screenSize does:
+     *  the capture is stretched across the screen, so a larger screen
+     *  shows the SAME whole page, bigger. Cropping is therefore redundant
+     *  for the page, and it is the video's own control (settings.videoZoom)
+     *  which the web panel used to overwrite, changing the 2D video zoom
+     *  behind the user's back. */
+    private fun webZoomF(): Float = 1f
+
     // ---------- gaze ----------
     // Panel size grows sub-linearly with distance (sqrt): distance changes
     // stay clearly visible (nearer = bigger) while extremes stay comfortable.
@@ -2241,7 +2253,7 @@ void main(){
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, webTexId)
         GLES20.glUniform1i(uTexWeb, 0)
-        GLES20.glUniform1f(uZoomWeb, flatZoomF())
+        GLES20.glUniform1f(uZoomWeb, webZoomF())
         GLES20.glUniformMatrix4fv(uMvpWeb, 1, false, mvpM, 0)
         GLES20.glEnableVertexAttribArray(aPosWeb)
         GLES20.glVertexAttribPointer(aPosWeb, 3, GLES20.GL_FLOAT, false, 0, m.verts)
@@ -2357,18 +2369,13 @@ void main(){
         if (uv == null) { webPagePointOk = false; webPageDist = -1f; webProgF = maxOf(0f, webProgF - dtMs / 600f); return }
 
         val dir = webBarDir(uv[0], uv[1])
-        // The shader zooms about the centre: undo it to reach the page pixel
-        // actually under the reticle (same zoom the picture is drawn with).
-        val z = flatZoomF()
-        val tu = 0.5f + (uv[0] - 0.5f) / z
-        val tv = 0.5f + (uv[1] - 0.5f) / z
-        val px = tu * webPageW
-        val py = (1f - tv) * webPageH
-        // The 3D point the ray actually hit. This is the SCREEN coord, not
-        // the texel: the shader zooms about the centre, so texel (tu,tv) is
-        // DISPLAYED at screen (uv). Placing the reticle at webPointAt(tu,tv)
-        // put it at the unzoomed texel position - wrong point as soon as
-        // zoom != 1, which is a depth error and a stereo one.
+        // The page is drawn with no texture zoom, so the texture coord under
+        // the reticle IS the screen coord. The inversion that used to live
+        // here was the source of a run of gaze/page misalignments: it fed
+        // the reticle the unzoomed texel position, which is only the same
+        // point while zoom happens to be 1.
+        val px = uv[0] * webPageW
+        val py = (1f - uv[1]) * webPageH
         noteWebPagePoint(uv[0], uv[1])
 
         // The dwell target is the STATE under the reticle, not the exact
@@ -2658,10 +2665,7 @@ void main(){
     fun updateWebDebugPoint() {
         if (!webDbgOn || mode != Mode.WEB) return
         val uv = synchronized(headViewM) { webGazeUv(lastEffFwd) } ?: return
-        val z = flatZoomF()
-        val tu = 0.5f + (uv[0] - 0.5f) / z
-        val tv = 0.5f + (uv[1] - 0.5f) / z
-        webDebugPoint = floatArrayOf(tu * webPageW, (1f - tv) * webPageH)
+        webDebugPoint = floatArrayOf(uv[0] * webPageW, (1f - uv[1]) * webPageH)
     }
 
     /** Keep the web panel shut for a moment. The gaze is often still over it

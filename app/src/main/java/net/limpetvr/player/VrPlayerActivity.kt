@@ -1989,8 +1989,8 @@ try {
             if (player != null) "Resume playback" else "No video playing",
             VrRenderer.BrowserRow.ACTION, action = "webvideo"
         )
-        r += Row("Zoom in", "${"%.2f".format(settings.videoZoom)}×", VrRenderer.BrowserRow.ACTION, action = "webzoom+")
-        r += Row("Zoom out", "${"%.2f".format(settings.videoZoom)}×", VrRenderer.BrowserRow.ACTION, action = "webzoom-")
+        r += Row("Zoom in", "${"%.2f".format(settings.screenSize)}×", VrRenderer.BrowserRow.ACTION, action = "webzoom+")
+        r += Row("Zoom out", "${"%.2f".format(settings.screenSize)}×", VrRenderer.BrowserRow.ACTION, action = "webzoom-")
         // Debug gaze crosshair. Toggleable: it is burned into the page
         // bitmap, so it sits on the page surface and can be mistaken for a
         // convergence problem (or cause one) while judging depth.
@@ -2015,8 +2015,19 @@ try {
         renderer.webPanelOpen = false
     }
 
+    /** Zoom the page by changing the screen size.
+     *
+     *  The capture is 16:9 and the screen is built 16:9 for it, so the
+     *  texture always covers the surface and there is nothing to crop: the
+     *  screen's extent IS the magnification. A larger screen shows the same
+     *  whole page, bigger, which is what zooming in should mean here.
+     *
+     *  This used to write settings.videoZoom - the shared 2D video zoom - so
+     *  the web panel silently changed the video's crop. Video keeps its own
+     *  crop-zoom, which is right for a frame. */
     private fun webZoom(dir: Int) {
-        settings.videoZoom = (settings.videoZoom * if (dir > 0) 1.25f else 0.8f).coerceIn(0.1f, 20f)
+        val f = if (dir > 0) 1.25f else 0.8f
+        settings.screenSize = (settings.screenSize * f).coerceIn(0.5f, 10f)
         applyOptics()
     }
 
