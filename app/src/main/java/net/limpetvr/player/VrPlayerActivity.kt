@@ -1287,17 +1287,160 @@ window.__limpet = {
       });
       return (el.tagName||'?') + '.' + (el.className||'') + '|' + (el.href||'');
   } catch (e) { return 'err:' + e; } },
-  scroll: function(f){ try { window.scrollBy(0, window.innerHeight*f); return true; } catch (e) { return false; } },
+  /* Which element actually scrolls?
+     window.scrollBy only moves the DOCUMENT. A consent wall or modal
+     usually scrolls an inner container instead, so document scrolling is a
+     no-op there: the bar looks live and does nothing. Find the real
+     scroller - the largest visible element that can actually scroll - and
+     use that, falling back to the document. */
+  _sc: null,
+  /* Which element actually scrolls?
+     Two shapes defeat the obvious document scroll:
+       - the document is locked (html/body overflow:hidden) and an inner
+         element scrolls. It is often overflow:hidden too, set by script,
+         so 'auto'/'scroll' alone misses it.
+       - a virtual scroller: content is moved with CSS transforms, so
+         scrollHeight == clientHeight and there is no scrollTop to set.
+     So accept any element that reports more content than it shows, and
+     record how it can be driven. */
+  scroller: function() {
+    var best = null, area = 0;
+    try {
+      var all = document.querySelectorAll('*');
+      for (var i = 0; i < all.length && i < 6000; i++) {
+        var e = all[i];
+        if (e.tagName === 'SCRIPT' || e.tagName === 'STYLE' ||
+            e.tagName === 'HEAD' || e.tagName === 'META') continue;
+        var over = e.scrollHeight - e.clientHeight;
+        if (over < 8) continue;
+        var r = e.getBoundingClientRect();
+        if (r.height < 40 || r.width < 40) continue;
+        if (r.bottom < 0 || r.top > window.innerHeight) continue;
+        var a = r.width * r.height;
+        if (a > area) { area = a; best = e; }
+      }
+    } catch (err) {}
+    return best;
+  },
+  /* Under the gaze if we can find it - the page's own handlers are usually
+     bound to the element actually being pointed at. */
+  gazeTarget: function() {
+    try {
+      var t = document.elementFromPoint(window.innerWidth * 0.5,
+                                        window.innerHeight * 0.5);
+      return t || document.body || document.documentElement;
+    } catch (err) { return document.body; }
+  },
+  _wheel: function(target, dy) {
+    try {
+      var ev;
+      if (typeof WheelEvent === 'function') {
+        ev = new WheelEvent('wheel', {
+          deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true,
+          clientX: (window.innerWidth * 0.5) | 0,
+          clientY: (window.innerHeight * 0.5) | 0
+        });
+      } else {
+        ev = document.createEvent('MouseEvents');
+        ev.initMouseEvent('wheel', true, true, window, 0, 0, 0, 0, 0,
+          false, false, false, false, 0, null);
+        ev.deltaY = dy;
+      }
+      target.dispatchEvent(ev);
+      return true;
+    } catch (err) { return false; }
+  },
+  page: function(dir) {
+    var moved = false, how = 'none';
+    try {
+      var e = this._sc && e_connected(this._sc) ? this._sc : this.scroller();
+      this._sc = e;
+      var step = window.innerHeight * 0.9 * dir;
+      if (e) {
+        var before = e.scrollTop;
+        e.scrollTop = before + e.clientHeight * 0.9 * dir;
+        moved = Math.abs(e.scrollTop - before) > 0.5;
+        if (moved) how = 'scrollTop';
+      }
+      if (!moved) {
+        var wb = window.pageYOffset;
+        window.scrollBy(0, step);
+        moved = Math.abs(window.pageYOffset - wb) > 0.5;
+        if (moved) how = 'window';
+      }
+      if (!moved) {
+        // Virtual scroller, or a handler-driven page: synthesise wheel
+        // events, which is what a real scroll gesture produces.
+        var t1 = this.gazeTarget();
+        this._wheel(t1, step);
+        if (t1 !== document.body && t1 !== document.documentElement)
+          this._wheel(document.body, step);
+        moved = true; how = 'wheel';
+      }
+      window.__limpetHow = how;
+      return moved;
+    } catch (err) { return false; }
+  },
+  /* What did we find? Logged when a page command appears to do nothing, so
+     the failure mode is identifiable instead of guessed at. */
+  diag: function() {
+    try {
+      var e = this._sc;
+      var parts = [];
+      parts.push('doc=' + (document.scrollingElement ?
+        Math.round(document.scrollingElement.scrollHeight) + '/' +
+        Math.round(document.scrollingElement.clientHeight) : '?'));
+      if (e && e_connected(e)) {
+        parts.push('sc=' + e.tagName + '.' + (e.className || '').toString().slice(0, 24) +
+          ' sh=' + Math.round(e.scrollHeight) + ' ch=' + Math.round(e.clientHeight) +
+          ' top=' + Math.round(e.scrollTop) +
+          ' oy=' + getComputedStyle(e).overflowY +
+          ' tf=' + getComputedStyle(e).transform);
+      } else parts.push('sc=none');
+      var vids = document.querySelectorAll('video');
+      if (vids.length) parts.push('vids=' + vids.length);
+      return parts.join(' ');
+    } catch (err) { return 'err'; }
+  },
+  /* PageUp/PageDown as the browser would deliver them. A synthetic
+     KeyboardEvent does not itself scroll anything (it has no default
+     action), so this is for the site's own key handling; the actual move
+     is page() above. */
+  key: function(dir) {
+    try {
+      var code = dir < 0 ? 33 : 34;          // PAGE_UP / PAGE_DOWN
+      var name = dir < 0 ? 'PageUp' : 'PageDown';
+      var tgt = document.activeElement || document.body;
+      if (!tgt) return false;
+      ['keydown', 'keyup'].forEach(function (t) {
+        tgt.dispatchEvent(new KeyboardEvent(t, {
+          key: name, code: name, keyCode: code, which: code,
+          bubbles: true, cancelable: true
+        }));
+      });
+      return true;
+    } catch (err) { return false; }
+  },
+  scroll: function(f){ return this.page(f > 0 ? 1 : -1); },
   state: function(){ try {
-      var se=document.scrollingElement||document.documentElement;
-      var b=document.body;
-      // Some pages scroll the body, not the documentElement, and report
-      // scrollHeight==clientHeight there: take whichever is taller.
-      var sh=Math.max(se?se.scrollHeight:0, b?b.scrollHeight:0, b?b.offsetHeight:0);
-      var ch=window.innerHeight;
-      return JSON.stringify({sh:sh, ch:ch, st:window.scrollY,
+      // Report the element that really scrolls, so the bar's thumb and
+      // page size match what PgUp/PgDn will move.
+      var e = this._sc && e_connected(this._sc) ? this._sc : this.scroller();
+      this._sc = e;
+      var sh, ch, st;
+      if (e) { sh = e.scrollHeight; ch = e.clientHeight; st = e.scrollTop; }
+      else {
+        var se = document.scrollingElement || document.documentElement;
+        var b = document.body;
+        sh = Math.max(se?se.scrollHeight:0, b?b.scrollHeight:0, b?b.offsetHeight:0);
+        ch = window.innerHeight; st = window.scrollY;
+      }
+      return JSON.stringify({sh:sh, ch:ch, st:st, inner: !!e,
                              url:location.href, t:document.title}); } catch (e) { return '{}'; } }
 };
+function e_connected(e) {
+  try { return !!(e && e.isConnected && e.getClientRects().length); } catch (x) { return false; }
+}
 /* "the page changed" counter, so a static page costs no captures at all */
 window.__limpetV = (window.__limpetV || 0) + 1;
 try {
