@@ -1,11 +1,13 @@
 # LimpetVR
 
-Native Cardboard VR video player for Android with in-headset SMB (SMB2/3)
+Native Cardboard VR web browser and video player for Android with in-headset SMB (SMB2/3)
 browsing and direct streaming.
 
 - Phone + Cardboard stereo rendering
 - Browse servers, folders, and files without leaving VR
 - Projections: Flat 2D/imax, SBS/TB, 180/220/270/360 domes, fisheye
+
+This is a work in progress. The web browser is not fully functional.
 
 ## Download
 
