@@ -222,6 +222,21 @@ class SettingsStore(ctx: Context) {
         baselineAt = nowMs
         baselineEver = true
     }
+    /** Re-apply the lens/calibration defaults only, leaving the user's
+     *  comfort and quality settings alone.
+     *
+     *  The 30-minute expiry used to call fireBaseline(), which also reset
+     *  screen size, curve, zoom, FOV and a dozen other things the user had
+     *  chosen. Screen geometry is not a calibration result, so a stale
+     *  session must not quietly undo it - otherwise the same "it reset
+     *  itself" surprise returns after half an hour away from the app. */
+    fun fireCalibrationBaseline(nowMs: Long) {
+        lensK1 = 0.34f; lensK2 = 0.55f
+        convTrim = -0.04f
+        swapEyes = false
+        baselineAt = nowMs
+    }
+
     /** Look-up tilt (deg, 10..60) that opens the VR play menu when it is on top. */
     var menuAngleUp: Float
         get() = p.getFloat("menu_angle_up",

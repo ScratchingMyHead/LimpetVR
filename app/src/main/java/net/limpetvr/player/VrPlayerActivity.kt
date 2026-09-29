@@ -69,7 +69,6 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         /** Baseline fired already in this process (fresh-process detection).
          *  Rotation recreates the activity in-process and must keep live tuning. */
         private var baselineFiredProcess = false
-        private const val BASELINE_EXPIRY_MS = 30L * 60L * 1000L
     }
 
     private lateinit var glView: GvrView
@@ -391,13 +390,23 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
         hideSystemBars()
         setContentView(R.layout.activity_vr)
         settings = SettingsStore(this)
-        // Startup baseline (§10): fresh install, fresh process, or 30-min
-        // expiry. Rotation recreates in-process and keeps live tuning.
+        // Startup baseline (§10) fires ONCE, on a genuinely fresh install.
+        //
+        // It used to fire on every fresh PROCESS, which meant every cold
+        // start (and so every new build) reset the calibration table AND the
+        // comfort settings the user had dialled in - screen size went back to
+        // 1x, curve to 0. Screen size and curve are a per-user comfort
+        // choice, not a calibration result, so they must survive a restart.
+        // The in-process guard still stops a rotation re-firing it.
         if (!baselineFiredProcess) {
             baselineFiredProcess = true
-            settings.fireBaseline(System.currentTimeMillis())
-            FileLog.i(TAG, "startup baseline fired (fresh process)")
-            Log.i(TAG, "startup baseline fired (fresh process)")
+            if (!settings.baselineEver) {
+                settings.fireBaseline(System.currentTimeMillis())
+                FileLog.i(TAG, "startup baseline fired (fresh install)")
+                Log.i(TAG, "startup baseline fired (fresh install)")
+            } else {
+                FileLog.i(TAG, "startup baseline skipped (already configured)")
+            }
         }
         connections = ConnectionStore(this).load()
         loadShapingShapes()
@@ -638,13 +647,6 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
     override fun onResume() {
         super.onResume()
         hideSystemBars()
-        // 30-minute baseline expiry (§10). Re-entry inside a session keeps
-        // live tuning (onCreate already handled the fresh-process fire).
-        if (System.currentTimeMillis() - settings.baselineAt > BASELINE_EXPIRY_MS) {
-            settings.fireBaseline(System.currentTimeMillis())
-            FileLog.i(TAG, "startup baseline fired (30-min expiry)")
-            Log.i(TAG, "startup baseline fired (30-min expiry)")
-        }
         applyOptics()
         renderer.resetBasis("entry") // next sensor reading centers the view
         connections = ConnectionStore(this).load()
