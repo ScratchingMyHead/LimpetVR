@@ -1557,12 +1557,27 @@ try {
     private fun setupWeb() {
         val host = findViewById<android.view.ViewGroup>(R.id.webHost)
         webHostRef = host
+        // The page's CSS viewport is the WebView's PIXEL size divided by the
+        // DISPLAY density, so 1440 / 2.625 = 548 CSS px wide and 900 / 2.625
+        // = 343 tall. That 343 is fixed by the 900px raster height, which is
+        // itself capped by the window's 900px content area (the display cutout
+        // and nav bar take the rest), so the viewport cannot be made taller
+        // from in here.
+        //
+        // Widening it was tried and abandoned: a density override context
+        // (createConfigurationContext with a different densityDpi) does not
+        // reach the page, because Chromium derives its scale factor from the
+        // display rather than the context. It changed OUR webDpr to 1.125
+        // while the page still reported dpr=2.625, which would have silently
+        // broken every click coordinate by 2.3x. setInitialScale and
+        // setDefaultZoomScale are absent from android-34's WebSettings, so
+        // there is no supported in-app route to a wider layout viewport; it
+        // would need a lower system display density.
+        //
+        // webDpr must therefore stay equal to what the page really does.
         val wv = WebView(this)
-        // The page's CSS viewport is the WebView size divided by the display
-        // density (1600 px / 2.625 = 609 CSS px). The page still RASTERISES
-        // at 1600 px, so it is sharp; gaze coordinates just have to be
-        // divided by this to land on the right CSS pixel.
         webDpr = wv.context.resources.displayMetrics.density.coerceAtLeast(0.1f)
+        FileLog.i("LimpetVR-web", "webview density=$webDpr raster=1440x900")
         wv.settings.javaScriptEnabled = true
         wv.settings.domStorageEnabled = true
         wv.settings.mediaPlaybackRequiresUserGesture = false
@@ -1591,6 +1606,10 @@ try {
                 webVersion++
             }
             override fun onPageFinished(view: WebView, url: String) {
+                // What the site actually sees, not what the arithmetic says.
+                view.evaluateJavascript(
+                    "window.innerWidth + 'x' + window.innerHeight + ' dpr=' + devicePixelRatio",
+                    { r -> FileLog.i("LimpetVR-web", "CSSVIEWPORT ${r?.trim()}") })
                 view.evaluateJavascript(webJs, null)
                 webStateAt = 0L // don't let the throttle swallow this probe
                 webVersion++
