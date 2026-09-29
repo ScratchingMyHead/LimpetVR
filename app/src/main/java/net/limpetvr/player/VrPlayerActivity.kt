@@ -1910,6 +1910,14 @@ try {
 
     /** Back to video, resuming whatever was playing. With no video there is
      *  nothing to go back to, so the file browser takes over. */
+    private fun webHideFullView() {
+        val v = webFullView ?: return
+        webFullView = null
+        (v.parent as? android.view.ViewGroup)?.removeView(v)
+        webFullCallback?.onCustomViewHidden()
+        webFullCallback = null
+    }
+
     /** The close button as a SEPARATE window.
      *
      *  In the activity window it is an ordinary view, so it sits UNDER a
