@@ -1238,6 +1238,12 @@ class VrPlayerActivity : AppCompatActivity(), SensorEventListener {
 
     // ---------------- web ----------------
     private var webView: WebView? = null
+    private var webHostRef: android.view.ViewGroup? = null
+    // Fullscreen video: the page hands us a View to promote. It goes inside
+    // webHost so PixelCopy captures it exactly like the rest of the page and
+    // it appears on the VR screen like any other page content.
+    private var webFullView: android.view.View? = null
+    private var webFullCallback: android.webkit.WebChromeClient.CustomViewCallback? = null
     private var bookmarks: MutableList<WebBookmark> = mutableListOf()
     private var webUrl = ""
     /** Where web mode starts with no bookmark. */
@@ -1299,11 +1305,115 @@ try {
     .observe(document.documentElement, {childList:true, subtree:true, attributes:true, characterData:true});
   window.addEventListener('scroll', function(){ window.__limpetV++; }, {passive:true});
 } catch (e) {}
+/* Fullscreen. The JS Fullscreen API is a no-op inside a WebView, so a site
+   asking for it (YouTube does) silently stays windowed. Serve it ourselves:
+   promote the video to fill the page, which is then picked up by the usual
+   capture and shown on the VR screen like any other page content. */
+try {
+  var LIM_STYLE = null;
+  function limRestore() {
+    if (LIM_STYLE) { LIM_STYLE.remove(); LIM_STYLE = null; }
+    var p = document.getElementById('__limpet_fs_prev');
+    if (p && p.parentNode) p.parentNode.removeChild(p);
+    window.__limpetFull = false;
+    window.__limpetV++;
+  }
+  function limFullscreen() {
+    // The element the site asked for, else the largest video on screen.
+    var el = document.fullscreenElement;
+    if (!el) {
+      var vs = document.querySelectorAll('video');
+      var best = null, area = 0;
+      for (var i = 0; i < vs.length; i++) {
+        var r = vs[i].getBoundingClientRect();
+        var a = r.width * r.height;
+        if (a > area) { area = a; best = vs[i]; }
+      }
+      el = best;
+    }
+    if (!el) return false;
+    // Hide the site's own player chrome for the duration: the controls are
+    // sized for a phone screen and land in awkward places on the VR screen.
+    var prev = null;
+    var p = el.parentNode;
+    while (p && p !== document.body) {
+      if (prev) prev.dataset.limpetOrig = prev.style.cssText || '';
+      prev = p; p = p.parentNode;
+    }
+    if (prev) {
+      var ph = document.createElement('div');
+      ph.id = '__limpet_fs_prev';
+      ph.setAttribute('data-limpet-was', prev.id || '');
+      prev.parentNode.insertBefore(ph, prev);
+    }
+    if (!LIM_STYLE) {
+      LIM_STYLE = document.createElement('style');
+      LIM_STYLE.textContent = 'video{position:fixed!important;left:0!important;' +
+        'top:0!important;width:100vw!important;height:100vh!important;' +
+        'max-width:none!important;max-height:none!important;object-fit:contain!important;' +
+        'z-index:2147483647!important;background:#000!important;}';
+      (document.head || document.documentElement).appendChild(LIM_STYLE);
+    }
+    el.setAttribute('controls', '');
+    el.play && el.play().catch(function(){});
+    window.__limpetFull = true;
+    window.__limpetAbsent = 0;
+    window.__limpetV++;
+    return true;
+  }
+  var rafReq = Element.prototype.requestFullscreen;
+  var rafEl = Element.prototype.requestFullscreenElement;
+  var caf = Document.prototype.exitFullscreen;
+  Element.prototype.requestFullscreen = function() {
+    if (limFullscreen()) return Promise.resolve();
+    return rafReq ? rafReq.apply(this, arguments) : Promise.resolve();
+  };
+  Element.prototype.requestFullscreenElement = function() {
+    if (limFullscreen()) return Promise.resolve();
+    return rafEl ? rafEl.apply(this, arguments) : Promise.resolve();
+  };
+  Document.prototype.exitFullscreen = function() {
+    if (window.__limpetFull) { limRestore(); return Promise.resolve(); }
+    return caf ? caf.apply(this, arguments) : Promise.resolve();
+  };
+  // Sites that only toggle a class/attribute need a nudge; poll cheaply while
+  // a video is playing and promote if the site believes it is fullscreen.
+  /* Sites signal fullscreen by restructuring their own DOM, so there is no
+     reliable flag to read: a poll that both promotes AND restores fights the
+     site and the video blinks back to windowed within a second. So the poll
+     only ever PROMOTES, and leaving is driven by the explicit signals
+     (exitFullscreen, Escape, the site's own exit control - which clears its
+     DOM, detected after a short debounce so a momentary gap mid-switch does
+     not drop us out). */
+  var absent = 0;
+  setInterval(function() {
+    try {
+      if (window.__limpetFull) {
+        // Site still looks like its own fullscreen (player fills the window)?
+        var v = document.querySelector('video');
+        var r = v && v.getBoundingClientRect();
+        var filling = r && r.width >= window.innerWidth * 0.9 &&
+          r.height >= window.innerHeight * 0.9;
+        if (filling) absent = 0;
+        else if (++absent > 3) { limRestore(); absent = 0; }
+        return;
+      }
+      var el = document.fullscreenElement;
+      var named = (document.documentElement.className || '').indexOf('fullscreen') >= 0 ||
+        (document.body && (document.body.className || '').indexOf('fullscreen') >= 0);
+      if (el || named) { limFullscreen(); absent = 0; }
+    } catch (e) {}
+  }, 500);
+  window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && window.__limpetFull) limRestore();
+  });
+} catch (e) {}
 })();
 """
 
     private fun setupWeb() {
         val host = findViewById<android.view.ViewGroup>(R.id.webHost)
+        webHostRef = host
         val wv = WebView(this)
         // The page's CSS viewport is the WebView size divided by the display
         // density (1600 px / 2.625 = 609 CSS px). The page still RASTERISES
@@ -1370,6 +1480,28 @@ try {
         // surface (see pumpWeb). GVR's own SurfaceView is put on top of the
         // window in onCreate, so none of this is ever visible.
 
+        // Without a WebChromeClient the fullscreen request is refused
+        // outright ("full screen is not available"): fullscreen video is
+        // delivered as a CustomView that the app must host itself.
+        wv.setWebChromeClient(object : android.webkit.WebChromeClient() {
+            override fun onShowCustomView(view: android.view.View?, cb: android.webkit.WebChromeClient.CustomViewCallback?) {
+                if (view == null) return
+                FileLog.i("LimpetVR-web", "onShowCustomView ${view.javaClass.simpleName}")
+                val h = webHostRef ?: return
+                webHideFullView()
+                webFullView = view
+                webFullCallback = cb
+                h.addView(view, android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+                view.requestFocus()
+            }
+
+            override fun onHideCustomView() {
+                FileLog.i("LimpetVR-web", "onHideCustomView")
+                webHideFullView()
+            }
+        })
         webView = wv
         bookmarks = BookmarkStore(this).load()
         // The page's own size is the texture's aspect.
