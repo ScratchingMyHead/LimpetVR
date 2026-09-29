@@ -1558,7 +1558,7 @@ try {
         val host = findViewById<android.view.ViewGroup>(R.id.webHost)
         webHostRef = host
         // The page's CSS viewport is the WebView's PIXEL size divided by the
-        // DISPLAY density, so 1440 / 2.625 = 548 CSS px wide and 900 / 2.625
+        // DISPLAY density, so 1600 / 2.625 = 609 CSS px wide and 900 / 2.625
         // = 343 tall. That 343 is fixed by the 900px raster height, which is
         // itself capped by the window's 900px content area (the display cutout
         // and nav bar take the rest), so the viewport cannot be made taller
@@ -1577,7 +1577,7 @@ try {
         // webDpr must therefore stay equal to what the page really does.
         val wv = WebView(this)
         webDpr = wv.context.resources.displayMetrics.density.coerceAtLeast(0.1f)
-        FileLog.i("LimpetVR-web", "webview density=$webDpr raster=1440x900")
+        FileLog.i("LimpetVR-web", "webview density=$webDpr raster=1600x900")
         wv.settings.javaScriptEnabled = true
         wv.settings.domStorageEnabled = true
         wv.settings.mediaPlaybackRequiresUserGesture = false
@@ -1723,12 +1723,28 @@ try {
     }
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var webPageVersion = -1
+    private var webDiagAt = 0L
 
     private fun pollPageVersion() {
         val wv = webView ?: return
         wv.evaluateJavascript("String(window.__limpetV||0)") { r ->
             val n = r?.trim()?.toIntOrNull() ?: return@evaluateJavascript
             if (n != webPageVersion) { webPageVersion = n; webVersion++ }
+        }
+        // Throttled scroller analysis, log only. This found the 16:10
+        // regression: the page reported a document that exactly fitted, so
+        // PgDn and the scrollbar were behaving correctly with nothing to
+        // scroll, which looked like a bug in the scroll code.
+        //
+        // It belongs here on the pump, not in pushWebState(): that is only
+        // called on page events and on scroll, so a "periodic" log there
+        // fired once and never again.
+        val t = System.currentTimeMillis()
+        if (t - webDiagAt > 3000L) {
+            webDiagAt = t
+            wv.evaluateJavascript("window.__limpet?__limpet.diag():'d'", { r ->
+                FileLog.i("LimpetVR-web", "SCROLLDIAG ${r?.trim()}")
+            })
         }
     }
 

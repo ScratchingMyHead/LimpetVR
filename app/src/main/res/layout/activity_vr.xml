@@ -10,14 +10,28 @@
          (PixelCopy) for the flat screen. It stays visible on the phone
          screen as a mirror; inside the headset you never see it.
 
-         1440x900 (16:10), not 16:9: the content area is only 900px tall
-         (the display cutout and nav bar take the rest), so height is the
-         binding constraint. At a fixed 1280px CSS viewport a taller aspect
-         costs FEWER pixels to read back, not more - 1.30M against 1.44M -
-         and gives the page more vertical room, so there is less scrolling. -->
+         1600x900 (16:9), deliberately. 1440x900 (16:10) was tried because it
+         is less letterboxy and cheaper to read back, but it narrows the CSS
+         viewport from 609 to 548 px, and sites have real breakpoints in that
+         range. Measured on one consent-walled site:
+
+             1600x900 -> viewport 609x343 -> document 1012/343  (scrolls)
+             1440x900 -> viewport 548x343 -> document  343/343  (no scroller)
+
+         At 548px the same page collapses to a document that exactly fits,
+         with its content in a wrapper that has overflow-y:visible and so no
+         scroll mechanism whatsoever. PgDn and the scrollbar were not broken -
+         there was nothing left to scroll, and the "I agree" button below the
+         fold became unreachable. 61px of width is not worth that.
+
+         The viewport HEIGHT is 343 CSS px at any aspect, because it is
+         900 raster px over the 2.625 display density, and 900 is the window's
+         content area (the display cutout and nav bar take the rest). So
+         aspect only ever moves width, never height - a taller aspect
+         narrows the screen rather than making it taller. -->
     <FrameLayout
         android:id="@+id/webHost"
-        android:layout_width="1440px" android:layout_height="900px"
+        android:layout_width="1600px" android:layout_height="900px"
         android:layout_gravity="center" />
     <TextView
         android:id="@+id/btnClose"
