@@ -59,6 +59,8 @@ class VrRenderer(
         data class Scroll(val dir: Int) : WebEvent()
         /** Dwell on inert page: open (true) or close (false) the web panel. */
         data class Panel(val open: Boolean) : WebEvent()
+        /** PgUp/PgDn button on the web panel: -1 up, +1 down. */
+        data class PageKey(val dir: Int) : WebEvent()
     }
 
     /** The GvrView we render into, set by the activity. Only used for
@@ -247,6 +249,12 @@ class VrRenderer(
      *  settings/shaping/sensor pages 0 (plain window, no strips). Set by
      *  the activity per page in pushRows. */
     @Volatile var pinTopRows = 0
+    /** PgUp/PgDn buttons, right side of the title bar. Web panel only: the
+     *  file and SMB lists have no page keys to send. */
+    @Volatile var webSideBtns = false
+    private var sideBtnDir = 0
+    private var sideBtnProg = 0f
+    private var sideBtnFired = false
     /** Scroll-strip state (GL thread): 0 idle, -1 scrolling up, +1 down. */
     private var scrollEngage = 0
     /** Strip currently earning trigger progress (same sign convention). */
@@ -582,6 +590,13 @@ class VrRenderer(
         const val VISIBLE_ROWS = 13
         const val PIN_Y0 = 114
         const val STRIP_H = 56
+        // PgUp/PgDn buttons, top-right of the panel (inside the title bar,
+        // which the short web title leaves free).
+        const val SIDE_BTN_X0 = 856f
+        const val SIDE_BTN_X1 = 1004f
+        const val SIDE_BTN_H = 46f
+        const val SIDE_BTN_UP_Y0 = 12f
+        const val SIDE_BTN_DN_Y0 = 62f
         /** Rows visible in the scrolling window (12 minus pinned rows). */
         fun winRows(pin: Int): Int = 12 - pin.coerceIn(0, 2)
         /** Top y of the scroll-up strip. */
@@ -1449,7 +1464,8 @@ void main(){
 
     private fun updateGaze() {
         val rows = browserRows
-        if (rows.isEmpty()) { highlight = -1; hitValid = false; inXZone = false; xDwellFired = false; scrollTrigF = 0f; sliderHoverU = -1f; lastFiredU = Float.NaN; return }
+        if (rows.isEmpty()) { highlight = -1; hitValid = false; inXZone = false; xDwellFired = false;
+            sideBtnDir = 0; sideBtnFired = false; sideBtnProg = 0f; scrollTrigF = 0f; sliderHoverU = -1f; lastFiredU = Float.NaN; return }
         if (now() < inputGraceUntil) { dwellStart = now(); sliderHoverU = -1f; return }
         // Windowed stillness + leaky dwell (same as the play menu): jitter
         // and row churn only dent progress instead of zeroing the timer.
@@ -1484,6 +1500,39 @@ void main(){
                 hitX = hx; hitY = hy; hitZ = hz; hitValid = true
                 val u = (alongRight + hw) / (2 * hw)
                 val v = (hh - alongUp) / (2 * hh)
+                // PgUp / PgDn, web panel only. Checked before the rows so a
+                // gaze on a button never selects the row underneath it.
+                if (webSideBtns) {
+                    val bx = u * TEX
+                    val by = v * TEX
+                    val onUp = bx >= SIDE_BTN_X0 && bx <= SIDE_BTN_X1 &&
+                        by >= SIDE_BTN_UP_Y0 && by < SIDE_BTN_UP_Y0 + SIDE_BTN_H
+                    val onDn = bx >= SIDE_BTN_X0 && bx <= SIDE_BTN_X1 &&
+                        by >= SIDE_BTN_DN_Y0 && by < SIDE_BTN_DN_Y0 + SIDE_BTN_H
+                    if (onUp || onDn) {
+                        val dir = if (onUp) -1 else 1
+                        sliderHoverU = -1f
+                        lastFiredU = Float.NaN
+                        fireBlockedLogged = false
+                        highlight = -1; dwellFiredFor = -2
+                        browProgF = maxOf(0f, browProgF - dtMs / 600f)
+                        scrollEngage = 0; scrollTrigDir = 0; scrollTrigF = 0f
+                        if (sideBtnDir != dir) { sideBtnDir = dir; sideBtnProg = 0f; sideBtnFired = false }
+                        if (!sideBtnFired) {
+                            if (still) sideBtnProg += dtMs / dwellMs.toFloat()
+                            else sideBtnProg = maxOf(0f, sideBtnProg - dtMs / 600f)
+                        }
+                        if (still && !sideBtnFired && sideBtnProg >= 1f) {
+                            sideBtnFired = true
+                            sideBtnProg = 1f
+                            FileLog.i("LimpetVR-web", "FIRE ${if (dir < 0) "PageUp" else "PageDown"}")
+                            onWebEvent(WebEvent.PageKey(dir))
+                        }
+                        return
+                    }
+                    sideBtnDir = 0; sideBtnFired = false
+                    sideBtnProg = maxOf(0f, sideBtnProg - dtMs / 600f)
+                }
                 // No close button on the panel: the gaze is still inside the
                 // panel's visibility range, so closing it just made it
                 // spring open again. It closes on its own when the gaze
@@ -1590,6 +1639,8 @@ void main(){
         hitValid = false
         inXZone = false
         xDwellFired = false
+        sideBtnDir = 0; sideBtnFired = false
+        sideBtnProg = maxOf(0f, sideBtnProg - 16f / 600f)
         dwellFiredFor = -2
         lastFiredU = Float.NaN
         fireBlockedLogged = false
@@ -3045,7 +3096,8 @@ void main(){
         var h = browserTitle.hashCode() * 31 + (if (stm) (scrollPos * ROW_H).toInt() else base) + pin * 7919
         for (i in 0 until pin.coerceAtMost(rows.size)) h = h * 31 + rowHash(rows, i)
         for (i in winStart until winEnd) h = h * 31 + rowHash(rows, i)
-        h = h * 31 + highlight + (if (inXZone) 1009 else 0) +
+        h = h * 31 + highlight + (if (webSideBtns) 20011 else 0) +
+            (sideBtnDir * 7919 + (sideBtnProg * 255).toInt()) +
             (if (sliderHoverU >= 0f) (sliderHoverU * 128).toInt() else 0)
         if (stm) h += scrollEngage * 131071 + scrollTrigDir * 1031 + (scrollTrigF * 32).toInt()
         if (h == lastPanelHash && browserBitmap != null) return
@@ -3055,7 +3107,17 @@ void main(){
         c.drawColor(Color.rgb(13, 20, 28))
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
         p.color = Color.WHITE; p.textSize = 44f
-        c.drawText(browserTitle.take(30), 40f, 72f, p)
+        // Don't draw the web title under the PgUp/PgDn buttons.
+        val titleMax = if (webSideBtns) 21 else 30
+        c.drawText(browserTitle.take(titleMax), 40f, 72f, p)
+        if (webSideBtns) {
+            p.textSize = 26f; p.textAlign = Paint.Align.CENTER
+            val upProg = if (sideBtnDir == -1 && !sideBtnFired) sideBtnProg else 0f
+            val dnProg = if (sideBtnDir == 1 && !sideBtnFired) sideBtnProg else 0f
+            drawSideBtn(c, p, SIDE_BTN_UP_Y0, "PgUp", sideBtnDir == -1, upProg)
+            drawSideBtn(c, p, SIDE_BTN_DN_Y0, "PgDn", sideBtnDir == 1, dnProg)
+            p.textAlign = Paint.Align.LEFT; p.textSize = 44f
+        }
         if (stm) {
             // File pages: pinned nav rows, scroll strips, fractional window.
             val upY0 = upStripY0(pin); val rY0 = rowsY0(pin); val dnY0 = downStripY0(pin)
@@ -3107,6 +3169,24 @@ void main(){
     /** Pinned scroll strip (file pages only): wide bar with
      *  trigger-progress fill while earning engagement, solid while
      *  gliding, dimmed at the travel end. */
+    /** One PgUp/PgDn button; fills as the dwell completes. */
+    private fun drawSideBtn(c: Canvas, p: Paint, y0: Float, label: String,
+                            hot: Boolean, prog: Float) {
+        p.color = when {
+            hot -> Color.rgb(30, 58, 95)
+            else -> Color.rgb(21, 32, 45)
+        }
+        c.drawRect(SIDE_BTN_X0, y0, SIDE_BTN_X1, y0 + SIDE_BTN_H, p)
+        if (prog > 0f) {
+            p.color = Color.rgb(8, 145, 178)
+            c.drawRect(SIDE_BTN_X0, y0, SIDE_BTN_X0 + (SIDE_BTN_X1 - SIDE_BTN_X0) * prog,
+                y0 + SIDE_BTN_H, p)
+        }
+        p.color = if (hot) Color.WHITE else Color.rgb(148, 163, 184)
+        p.textSize = 26f
+        c.drawText(label, (SIDE_BTN_X0 + SIDE_BTN_X1) * 0.5f, y0 + 32f, p)
+    }
+
     private fun drawScrollStrip(c: Canvas, p: Paint, y0: Float, dir: Int) {
         val pin = pinTopRows.coerceIn(0, 2)
         val maxS = maxOf(0, browserRows.size - pin - winRows(pin)).toFloat()

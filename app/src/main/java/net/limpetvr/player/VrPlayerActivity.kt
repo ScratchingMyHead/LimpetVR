@@ -1866,6 +1866,18 @@ try {
             is VrRenderer.WebEvent.Scroll ->
                 wv.evaluateJavascript("window.__limpet?__limpet.scroll(${if (e.dir > 0) "0.9" else "-0.9"}):false", null)
             is VrRenderer.WebEvent.Panel -> if (e.open) openWebPanel() else closeWebPanel()
+            is VrRenderer.WebEvent.PageKey -> {
+                wv.evaluateJavascript(
+                    "window.__limpet?__limpet.diag():'d'", { d ->
+                        FileLog.i("LimpetVR-web", "PAGEDIR=${e.dir} $d")
+                    })
+                // Send the real key first (sites listen for it), then move the
+                // scroller, since a synthetic key has no default scroll.
+                wv.evaluateJavascript(
+                    "window.__limpet?__limpet.key(${e.dir}):false", null)
+                wv.evaluateJavascript(
+                    "window.__limpet?__limpet.page(${e.dir}):false", null)
+            }
         }
     }
 
@@ -1986,6 +1998,7 @@ try {
             )
         }
         pushRows(webTitle.ifBlank { "Web" }, "", r)
+        renderer.webSideBtns = true
         renderer.browserElevDeg = renderer.overlayElevDeg()
         renderer.webPanelOpen = true
     }
